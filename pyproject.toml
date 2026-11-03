@@ -7,7 +7,10 @@ authors = [
     { name = "uria", email = "uria1480@gmail.com" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "pydantic>=2.14.2",
+    "python-bidi>=0.6.12",
+]
 
 [project.scripts]
 portfolio-copilot = "portfolio_copilot:main"

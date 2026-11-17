@@ -12,9 +12,11 @@ load_dotenv()
 client = OpenAI(
     api_key=os.getenv("OPENAI_API_KEY"),
     base_url=os.getenv("OPENAI_BASE_URL"),
+    timeout=30,
+    max_retries=2,
 )
 
-MODEL_NAME = "models/gemini-3.5-flash-lite"
+MODEL_NAME = os.getenv("MODEL_NAME") or "models/gemini-3.5-flash-lite"
 MAX_TOOL_ROUNDS = 4
 
 SYSTEM_PROMPT = """אתה Portfolio Copilot – מתכנן ומאפיין פיננסי אישי, בפרויקט אקדמי בקורס מבוא לבינה מלאכותית.

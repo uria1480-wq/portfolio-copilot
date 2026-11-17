@@ -1,10 +1,64 @@
 """חיבור הכלים לסוכן: הגדרות הכלים שה-LLM רואה, והפונקציה שמריצה אותם."""
+import re
+
 from portfolio_copilot.plan import SavingsPlan
 from portfolio_copilot.salary import plan_salary
-from portfolio_copilot.schemas import InvestorProfile
+from portfolio_copilot.schemas import LIFE_STAGES, RISK_LEVELS, InvestorProfile, apply_profile_update
 from portfolio_copilot.tools import get_prices, plan_trades
 
-TOOL_SPECS = [
+PROFILE_TOOL_SPECS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "update_profile",
+            "description": (
+                "שומר בפרופיל ערכים שהמשתמש אמר. כל ערך נבדק בקוד: התוצאה מחזירה מה התקבל (accepted), "
+                "מה נדחה ולמה (rejected), מה עוד חסר (missing) ואת השדה הבא לשאול עליו (next_field). "
+                "שלח רק שדות שהמשתמש אמר במפורש. risk_confirmed=true רק אם המשתמש אישר במפורש את רמת הסיכון."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "age": {"type": "integer", "description": "גיל, 0 עד 120"},
+                    "life_stage": {"type": "string", "enum": list(LIFE_STAGES)},
+                    "initial_amount": {"type": "number", "description": "סכום ראשוני להשקעה, לא שלילי"},
+                    "monthly_deposit": {"type": "number", "description": "הפקדה חודשית שהמשתמש בחר, לא שלילית"},
+                    "needs_cashflow": {"type": "boolean"},
+                    "investment_goal": {"type": "string"},
+                    "investment_horizon_years": {"type": "integer", "description": "אופק בשנים, 1 עד 80"},
+                    "recommended_risk_level": {"type": "string", "enum": list(RISK_LEVELS)},
+                    "risk_confirmed": {"type": "boolean"},
+                    "max_single_asset_weight": {"type": "number", "description": "תקרת משקל לנכס בודד, 0.05 עד 1"},
+                    "relevant_vehicles": {"type": "array", "items": {"type": "string"}},
+                    "agent_reasoning": {"type": "string", "description": "נימוק קצר לרמת הסיכון"},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_restriction",
+            "description": (
+                "שומר בפרופיל נכס שהמשתמש אמר שהוא לא מוכר. מעכשיו כל חישוב (plan_deposit, משכורת) לא יציע למכור אותו. "
+                "אם הפרופיל מלא ויש החזקות, ההצעה מחושבת מחדש ומוחזרת ב-replan."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {"type": "string", "description": "הסימול כפי שהוא מופיע ב-get_portfolio, למשל ZIM"},
+                    "kind": {"type": "string", "enum": ["no_sell"], "description": "סוג המגבלה"},
+                    "allow_sell": {"type": "boolean", "description": "האם לכלול בחישוב החוזר הצעות מכירה לנכסים אחרים. ברירת מחדל false"},
+                },
+                "required": ["symbol"],
+            },
+        },
+    },
+]
+PROFILE_TOOLS = {spec["function"]["name"] for spec in PROFILE_TOOL_SPECS}
+
+TOOL_SPECS = [*PROFILE_TOOL_SPECS,
     {
         "type": "function",
         "function": {
@@ -30,7 +84,7 @@ TOOL_SPECS = [
                     "keep_symbols": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "סימולים שהמשתמש אמר שהוא לא מוכר (לפי ה-restrictions בפרופיל), למשל [\"ZIM\"].",
+                        "description": "סימולים נוספים שלא למכור בחישוב הזה בלבד. מגבלות ששמורות בפרופיל נאכפות אוטומטית.",
                     },
                 },
                 "required": [],
@@ -132,6 +186,51 @@ def _prices_for(symbols, fetch):
         except Exception:
             errors.append(s)
     return prices, errors
+
+
+SYMBOL_RE = re.compile(r"^[A-Z0-9][A-Z0-9.\-]{0,14}$")
+
+
+def _profile_status(profile: InvestorProfile) -> dict:
+    missing = profile.missing_fields()
+    return {"missing": missing, "next_field": missing[0] if missing else None, "complete": not missing}
+
+
+def run_profile_tool(name: str, args: dict, profile: InvestorProfile,
+                     store=None, user_id: int | None = None, fetch=None) -> tuple[dict, InvestorProfile]:
+    """מריץ כלי שמשנה את הפרופיל. מחזיר (תוצאה למודל, פרופיל מעודכן). הפרופיל לא משתנה כשיש שגיאה."""
+    args = args if isinstance(args, dict) else {}
+
+    if name == "update_profile":
+        new_profile, accepted, rejected = apply_profile_update(profile, args)
+        return {"accepted": accepted, "rejected": rejected, **_profile_status(new_profile)}, new_profile
+
+    if name == "add_restriction":
+        kind = args.get("kind") or "no_sell"
+        if kind != "no_sell":
+            return {"error": f"סוג מגבלה לא נתמך: {kind}. נתמך רק no_sell"}, profile
+        symbol = str(args.get("symbol") or "").strip().upper()
+        if not SYMBOL_RE.match(symbol):
+            return {"error": "חסר סימול תקין. השתמש בסימול מ-get_portfolio, למשל ZIM"}, profile
+
+        data = profile.model_dump()
+        data["no_sell_symbols"] = list(dict.fromkeys([*data["no_sell_symbols"], symbol]))
+        data["restrictions"] = list(dict.fromkeys([*data["restrictions"], f"לא למכור: {symbol}"]))
+        new_profile = InvestorProfile(**data)
+        result = {"saved": True, "no_sell_symbols": new_profile.no_sell_symbols, **_profile_status(new_profile)}
+
+        holdings = store.list_holdings(user_id) if store is not None and user_id is not None else []
+        if holdings and symbol not in {h["symbol"] for h in holdings}:
+            result["warning"] = f"{symbol} לא נמצא בהחזקות השמורות"
+        if not holdings or not new_profile.is_complete():
+            result["replan"] = None
+            result["replan_note"] = "אין עדיין החזקות או שהפרופיל לא מלא, ולכן לא חושבה הצעה מחדש"
+        else:
+            replan_args = {"amount": new_profile.monthly_deposit or 0, "allow_sell": bool(args.get("allow_sell"))}
+            result["replan"] = run_tool("plan_deposit", replan_args, store, user_id, new_profile, fetch)
+        return result, new_profile
+
+    return {"error": f"כלי פרופיל לא מוכר: {name}"}, profile
 
 
 def run_tool(name: str, args: dict, store, user_id: int, profile: InvestorProfile, fetch=None, kb=None) -> dict:

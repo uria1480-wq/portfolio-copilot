@@ -15,7 +15,8 @@ names = lambda specs: {t["function"]["name"] for t in specs}
 
 
 def test_all_tools_coexist():
-    base = {"get_portfolio", "plan_deposit", "get_documents", "propose_plan", "salary_received"}
+    base = {"update_profile", "add_restriction",
+            "get_portfolio", "plan_deposit", "get_documents", "propose_plan", "salary_received"}
     assert names(tool_specs(False)) == base
     assert names(tool_specs(True)) == base | {"search_documents"}
 

@@ -4,7 +4,7 @@ import re
 from dotenv import load_dotenv
 from openai import OpenAI
 from portfolio_copilot.schemas import InvestorProfile, merge_profile
-from portfolio_copilot.agent_tools import tool_specs, run_tool
+from portfolio_copilot.agent_tools import PROFILE_TOOLS, run_profile_tool, run_tool, tool_specs
 
 load_dotenv()
 
@@ -27,19 +27,24 @@ SYSTEM_PROMPT = """אתה Portfolio Copilot – מתכנן ומאפיין פינ
 - לקראת פרישה / פנסיונר: שפה מכבדת, שמירת ערך הקרן, תזרים חודשי יציב, שמרנות ביחס לתנודתיות, והיבטי מס משיכה.
 
 עקרונות השיחה:
-1. אל תחקור כמו טופס. שאלה אחת או שתיים בכל פעם.
+1. אל תחקור כמו טופס. שאל שאלה אחת בלבד בכל תור.
 2. תהיה פרואקטיבי: אם המשתמש משתף גיל ומצב, הצע רמת סיכון מנומקת (שמרני / מאוזן / אגרסיבי) ומכשירים מתאימים.
 3. רמת הסיכון היא הצעה בלבד. אחרי שהצעת אותה, שאל את המשתמש אם היא מתאימה לו.
-   החזר risk_confirmed=true רק אם המשתמש אישר במפורש בהודעה האחרונה, או שבחר בעצמו רמת סיכון אחרת.
-   בכל מקרה אחר החזר false.
-4. אם המשתמש מציב מגבלה (למשל: "לא רוצה למכור מניה מסוימת", או שיש לו ריכוז גבוה בנכס אחד), הוסף אותה ל-restrictions.
-   אל תמחק מגבלות קיימות.
+   risk_confirmed=true רק אם המשתמש אישר במפורש בהודעה האחרונה, או שבחר בעצמו רמת סיכון אחרת.
+4. אם המשתמש אומר שהוא לא מוכר נכס מסוים, קרא ל-add_restriction עם הסימול. אל תמחק מגבלות קיימות.
 5. אל תמציא מספרים שהמשתמש לא נתן.
 
+בניית הפרופיל:
+- בכל פעם שהמשתמש מוסר פרט על עצמו, קרא ל-update_profile עם השדות שאמר, לפני שאתה עונה.
+- אם שדה הגיע ב-rejected, הסבר בקצרה למה ובקש אותו שוב.
+- אם complete=false, שאל שאלה אחת בלבד, על השדה שב-next_field. אם complete=true, אל תשאל עוד שאלות פרופיל.
+
 כלים שעומדים לרשותך:
+- update_profile: שמירת פרטי פרופיל, עם בדיקה בקוד. מחזיר accepted, rejected, missing, next_field ו-complete.
+- add_restriction: שמירת נכס שהמשתמש לא מוכר. נאכף בקוד בכל חישוב, ומחזיר ב-replan הצעה מחושבת מחדש אם אפשר.
 - get_portfolio: ההחזקות של המשתמש עם מחירים, שווי ומשקל. קרא לו כשהמשתמש שואל על התיק שלו או לפני שאתה מדבר על ריכוז.
 - plan_deposit: הצעה להשקעה לפי רמת הסיכון שאושרה: חלוקת הפקדה, ואם המשתמש ביקש או הסכים לשקול מכירה (allow_sell=true) גם הצעות מכירה.
-  העבר ב-keep_symbols נכסים שהמשתמש אמר שהוא לא מוכר. קרא לו רק אחרי שהמשתמש אישר את רמת הסיכון.
+  נכסים ששמרת עם add_restriction לא יוצעו למכירה אוטומטית. קרא לו רק אחרי שהמשתמש אישר את רמת הסיכון.
 - get_documents: נתונים ממסמכים שהמשתמש העלה: תלושי שכר (נטו, הפרשות לפנסיה, מס שולי) ודוחות רבעוניים מקופות
   גמל, השתלמות ופנסיה (יתרה, דמי ניהול מול ממוצע הקופה, מסלול ותשואה). קרא לו כשמדברים על הכנסה,
   על חיסכון פנסיוני, או לפני שאתה מציע כמה אפשר להפקיד בחודש. אם יש warnings, ציין שכדאי לאמת את המספרים מול התלוש.
@@ -127,10 +132,17 @@ def repair_to_json(raw: str, history: list[dict]) -> dict | None:
 
 def chat_step(messages_history: list[dict], current_profile: InvestorProfile,
               store=None, user_id: int | None = None, fetch=None, kb=None) -> tuple[str, InvestorProfile]:
-    """מריץ תור שיחה. אם יש store ו-user_id, הסוכן יכול להפעיל כלים (get_portfolio, plan_deposit)."""
+    """מריץ תור שיחה. אם יש store ו-user_id, הסוכן יכול להפעיל כלים.
+
+    כלי פרופיל (update_profile, add_restriction) מעדכנים את הפרופיל כבר בתוך הלולאה: כלים שרצים
+    אחריהם באותו תור רואים את הפרופיל החדש, והוא נשמר מיד ב-store.
+    """
+    def profile_message(profile: InvestorProfile) -> dict:
+        return {"role": "system", "content": f"פרופיל נוכחי שנאסף עד כה:\n{profile.model_dump_json()}"}
+
     prompt_messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "system", "content": f"פרופיל נוכחי שנאסף עד כה:\n{current_profile.model_dump_json()}"},
+        profile_message(current_profile),
     ]
     prompt_messages.extend(messages_history)
     use_tools = store is not None and user_id is not None
@@ -153,7 +165,15 @@ def chat_step(messages_history: list[dict], current_profile: InvestorProfile,
                     args = json.loads(call.function.arguments or "{}")
                 except json.JSONDecodeError:
                     args = {}
-                result = run_tool(call.function.name, args, store, user_id, current_profile, fetch, kb)
+                if call.function.name in PROFILE_TOOLS:
+                    result, new_profile = run_profile_tool(call.function.name, args, current_profile,
+                                                           store, user_id, fetch)
+                    if new_profile != current_profile:
+                        current_profile = new_profile
+                        prompt_messages[1] = profile_message(current_profile)
+                        store.save_profile(user_id, current_profile)
+                else:
+                    result = run_tool(call.function.name, args, store, user_id, current_profile, fetch, kb)
                 prompt_messages.append({
                     "role": "tool",
                     "tool_call_id": call.id,

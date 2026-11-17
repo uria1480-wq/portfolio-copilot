@@ -129,7 +129,7 @@ def plan_trades(profile: InvestorProfile, holdings: list[dict], prices: dict[str
     """מציע קניות ומכירות. ההחלטה הסופית תמיד אצל המשתמש.
 
     - נכס בודד שחורג מהתקרה מוצע למכירה עד התקרה (רק אם allow_sell=True).
-    - נכסים ב-keep_symbols (שהמשתמש אמר שלא ימכור) לא מוצעים למכירה לעולם.
+    - נכסים ב-keep_symbols או ב-profile.no_sell_symbols (שהמשתמש אמר שלא ימכור) לא מוצעים למכירה לעולם.
     - הכסף שהתפנה והפקדה חדשה מחולקים בין נכסי היעד לפי רמת הסיכון שאושרה.
     """
     _check_inputs(profile, holdings, prices)
@@ -137,7 +137,7 @@ def plan_trades(profile: InvestorProfile, holdings: list[dict], prices: dict[str
         raise ValueError("סכום ההפקדה לא יכול להיות שלילי")
     if isinstance(keep_symbols, str):
         keep_symbols = [keep_symbols]
-    keep = {s.strip().upper() for s in (keep_symbols or []) if s and s.strip()}
+    keep = {s.strip().upper() for s in [*(keep_symbols or []), *profile.no_sell_symbols] if s and s.strip()}
 
     cap = profile.max_single_asset_weight or 0.20
     universe = set(UNIVERSE.values())

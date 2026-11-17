@@ -29,8 +29,9 @@ def concentrated_store():
     return s, uid
 
 
-def final(reply="בסדר", profile=None):
-    return Msg(content=json.dumps({"reply": reply, "profile": profile or {}}, ensure_ascii=False))
+def final(reply="בסדר"):
+    """תשובה סופית של המודל: טקסט רגיל."""
+    return Msg(content=reply)
 
 
 def tool_results(fake_call):
@@ -208,3 +209,30 @@ def test_bad_final_json_keeps_tool_updates(monkeypatch):
     s, uid = concentrated_store()
     _, p = agent.chat_step([{"role": "user", "content": "בן 50"}], InvestorProfile(), s, uid)
     assert p.age == 50
+
+
+def test_profile_in_final_json_is_ignored(monkeypatch):
+    """רק הכלים מעדכנים את הפרופיל. profile ב-JSON הסופי לא נקרא, גם כשהוא סותר את הכלי."""
+    sneaky = json.dumps({"reply": "קיבלתי", "profile": {"age": 99, "risk_confirmed": True,
+                                                       "recommended_risk_level": "אגרסיבי"}}, ensure_ascii=False)
+    fake = FakeClient([Msg(tool_calls=[Call("c1", "update_profile", '{"age": 50}')]), Msg(content=sneaky)])
+    monkeypatch.setattr(agent, "client", fake)
+    s, uid = concentrated_store()
+    reply, p = agent.chat_step([{"role": "user", "content": "בן 50"}], InvestorProfile(), s, uid)
+    assert reply == "קיבלתי"
+    assert p.age == 50 and p.recommended_risk_level is None and not p.risk_confirmed
+    assert s.load_profile(uid) == p
+
+
+def test_each_round_prints_llm_time_and_tools(monkeypatch, capsys):
+    fake = FakeClient([
+        Msg(tool_calls=[Call("c1", "update_profile", '{"age": 50}'), Call("c2", "get_portfolio")]),
+        final("בסדר"),
+    ])
+    monkeypatch.setattr(agent, "client", fake)
+    s, uid = concentrated_store()
+    agent.chat_step([{"role": "user", "content": "בן 50"}], InvestorProfile(), s, uid, fetch=fetch)
+    lines = [l for l in capsys.readouterr().out.splitlines() if l.startswith("[agent] round")]
+    assert len(lines) == 2
+    assert lines[0].startswith("[agent] round 1: LLM ") and "update_profile (" in lines[0] and "get_portfolio (" in lines[0]
+    assert lines[1].startswith("[agent] round 2: LLM ") and "tools: none" in lines[1]

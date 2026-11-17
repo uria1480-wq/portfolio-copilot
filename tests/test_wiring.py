@@ -3,7 +3,6 @@ import os
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
 os.environ.setdefault("OPENAI_BASE_URL", "http://localhost")
 
-import json
 from types import SimpleNamespace
 
 from portfolio_copilot import agent
@@ -34,7 +33,7 @@ def test_get_documents_returns_latest_payslips_and_average():
 
 def test_chat_step_passes_kb_so_search_tool_is_offered(monkeypatch):
     calls = []
-    final = json.dumps({"reply": "בסדר", "profile": {}}, ensure_ascii=False)
+    final = "בסדר"
 
     def create(**kwargs):
         calls.append(kwargs)

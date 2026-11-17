@@ -1,9 +1,10 @@
 import os
 import json
 import re
+import time
 from dotenv import load_dotenv
 from openai import OpenAI
-from portfolio_copilot.schemas import InvestorProfile, merge_profile
+from portfolio_copilot.schemas import InvestorProfile
 from portfolio_copilot.agent_tools import PROFILE_TOOLS, run_profile_tool, run_tool, tool_specs
 
 load_dotenv()
@@ -64,25 +65,9 @@ SYSTEM_PROMPT = """אתה Portfolio Copilot – מתכנן ומאפיין פינ
 - על שאלות עלות ומס ענה רק מתוך הקטעים ש-search_documents החזיר, וציין את שם המסמך כמקור.
   אם הקטעים לא עונים על השאלה, אמור שלא נמצא מידע במסמכים. אל תנחש מספרים ואל תשלים מהידע הכללי שלך.
 
-עליך להחזיר תמיד אך ורק אובייקט JSON תקין (ללא מרקדאון או טקסט עודף) במבנה הבא:
-{
-  "reply": "התשובה או השאלות שלך למשתמש בעברית",
-  "profile": {
-    "age": מספר או null,
-    "life_stage": "נוער / סטודנט / משפחה צעירה / לקראת פרישה / פנסיונר או null",
-    "initial_amount": מספר או null,
-    "monthly_deposit": מספר או null,
-    "needs_cashflow": true/false/null,
-    "investment_goal": "מחרוזת או null",
-    "relevant_vehicles": ["מכשירים מתאימים"],
-    "recommended_risk_level": "שמרני / מאוזן / אגרסיבי או null",
-    "risk_confirmed": true/false,
-    "investment_horizon_years": מספר שנים או null,
-    "max_single_asset_weight": מספר בין 0.05 ל-1.0 או null,
-    "agent_reasoning": "נימוק קצר למה רמת הסיכון והמכשירים מתאימים",
-    "restrictions": ["מגבלות חדשות או קיימות"]
-  }
-}
+פורמט התשובה:
+- ענה למשתמש בטקסט רגיל בעברית, בלי JSON.
+- הפרופיל מתעדכן אך ורק דרך הכלים update_profile ו-add_restriction. מה שלא נשמר דרכם לא נשמר בכלל.
 """
 
 
@@ -98,10 +83,38 @@ def extract_json(text: str) -> dict:
 
 def salvage_reply(text: str) -> str | None:
     """אם ה-JSON שבור, מנסה לשלוף לפחות את שדה reply כדי שהמשתמש יקבל תשובה."""
-    match = re.search(r'"reply"\s*:\s*"(.*?)"\s*,\s*"profile"', text or "", re.DOTALL)
+    match = re.search(r'"reply"\s*:\s*"((?:[^"\\]|\\.)*)"', text or "", re.DOTALL)
     if not match:
         return None
-    return match.group(1).replace("\\n", "\n").replace('\\"', '"')
+    try:
+        return json.loads(f'"{match.group(1)}"', strict=False)
+    except json.JSONDecodeError:
+        return match.group(1).replace("\\n", "\n").replace('\\"', '"')
+
+
+FALLBACK_REPLY = "לא הצלחתי לעבד את התשובה, אפשר לנסח שוב?"
+
+
+def final_reply_text(raw: str | None) -> str:
+    """התשובה הסופית של המודל היא טקסט רגיל ומוצגת כמו שהיא.
+    אם המודל בכל זאת החזיר JSON עם reply, מחלצים רק את reply. שדות אחרים (כמו profile) לא נקראים."""
+    text = (raw or "").strip()
+    if not text:
+        return FALLBACK_REPLY
+    if '"reply"' in text:
+        try:
+            data = extract_json(text)
+        except json.JSONDecodeError:
+            data = None
+        if isinstance(data, dict) and isinstance(data.get("reply"), str) and data["reply"].strip():
+            return data["reply"]
+        salvaged = salvage_reply(text)
+        if salvaged and salvaged.strip():
+            return salvaged
+    if text.startswith(("{", "[")) or (text.startswith("```") and "{" in text):
+        print("[agent] התשובה נראית כמו JSON בלי reply. תשובת המודל:\n", text[:1200])
+        return FALLBACK_REPLY
+    return text
 
 
 REPAIR_PROMPT = """קיבלת את ההודעה האחרונה של משתמש ואת תשובת סוכן פיננסי שלא הגיעה כ-JSON תקין.
@@ -152,15 +165,20 @@ def chat_step(messages_history: list[dict], current_profile: InvestorProfile,
             kwargs = {"model": MODEL_NAME, "messages": prompt_messages, "temperature": 0.3}
             if use_tools and round_no < MAX_TOOL_ROUNDS:
                 kwargs["tools"] = tool_specs(kb is not None)
+            started = time.perf_counter()
             response = client.chat.completions.create(**kwargs)
+            llm_seconds = time.perf_counter() - started
             message = response.choices[0].message
 
             if not message.tool_calls:
+                print(f"[agent] round {round_no + 1}: LLM {llm_seconds:.2f}s | tools: none (final answer)")
                 break
 
             # מחזירים למודל את בקשת הכלים (כולל שדות נוספים של הספק) ואת התוצאות
             prompt_messages.append(message.model_dump(exclude_none=True))
+            tool_timings = []
             for call in message.tool_calls:
+                tool_started = time.perf_counter()
                 try:
                     args = json.loads(call.function.arguments or "{}")
                 except json.JSONDecodeError:
@@ -179,21 +197,11 @@ def chat_step(messages_history: list[dict], current_profile: InvestorProfile,
                     "tool_call_id": call.id,
                     "content": json.dumps(result, ensure_ascii=False),
                 })
+                tool_timings.append(f"{call.function.name} ({time.perf_counter() - tool_started:.2f}s)")
+            print(f"[agent] round {round_no + 1}: LLM {llm_seconds:.2f}s | tools: {', '.join(tool_timings)}")
 
-        raw = message.content or "{}"
-        try:
-            data = extract_json(raw)
-        except json.JSONDecodeError:
-            print("[agent] לא ניתן לפענח JSON. תשובת המודל:\n", raw[:1200])
-            data = repair_to_json(raw, messages_history)
-            if data is None:
-                fallback = salvage_reply(raw)
-                if fallback is None and not raw.lstrip().startswith(("{", "[", "```")):
-                    fallback = raw.strip()  # המודל ענה בטקסט חופשי: מציגים אותו כמו שהוא
-                return (fallback or "לא הצלחתי לעבד את התשובה, אפשר לנסח שוב?"), current_profile
-        bot_reply = data.get("reply", "הבנתי. ספר לי עוד על המצב והיעדים שלך.")
-        updated_profile = merge_profile(current_profile, data.get("profile", {}))
-        return bot_reply, updated_profile
+        # הפרופיל כבר עודכן בכלים. התשובה הסופית היא טקסט בלבד ולא משנה אותו.
+        return final_reply_text(message.content), current_profile
 
     except Exception as e:
         return f"שגיאה בתקשורת עם הסוכן: {e}", current_profile

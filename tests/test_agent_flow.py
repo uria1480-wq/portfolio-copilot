@@ -1,4 +1,3 @@
-import json
 import os
 
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
@@ -43,7 +42,7 @@ class FakeClient:
         return SimpleNamespace(choices=[SimpleNamespace(message=reply)])
 
 
-FINAL = json.dumps({"reply": "התיק שלך מאוזן", "profile": {"age": 41}}, ensure_ascii=False)
+FINAL = "התיק שלך מאוזן"
 
 
 def store_with_holding():
@@ -58,7 +57,7 @@ def test_tool_round_trip(monkeypatch):
     monkeypatch.setattr(agent, "client", fake)
     s, uid = store_with_holding()
     reply, profile = agent.chat_step([{"role": "user", "content": "מה מצב התיק?"}], InvestorProfile(), s, uid, fetch=lambda x: 100.0)
-    assert reply == "התיק שלך מאוזן" and profile.age == 41
+    assert reply == "התיק שלך מאוזן" and profile == InvestorProfile()
     assert "tools" in fake.calls[0]
     tool_msg = [m for m in fake.calls[1]["messages"] if m["role"] == "tool"][0]
     assert tool_msg["tool_call_id"] == "c1" and "VT" in tool_msg["content"]

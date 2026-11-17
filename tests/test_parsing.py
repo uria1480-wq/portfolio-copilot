@@ -9,10 +9,20 @@ from portfolio_copilot import agent
 from portfolio_copilot.schemas import InvestorProfile
 
 
+def counting_client(*contents):
+    """לקוח מדומה שמחזיר את התשובות לפי הסדר וסופר קריאות."""
+    items, calls = list(contents), []
+
+    def create(**kwargs):
+        calls.append(kwargs)
+        content = items.pop(0) if len(items) > 1 else items[0]
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content, tool_calls=None))])
+
+    return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))), calls
+
+
 def fake_client(content):
-    msg = SimpleNamespace(content=content, tool_calls=None)
-    create = lambda **kw: SimpleNamespace(choices=[SimpleNamespace(message=msg)])
-    return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    return counting_client(content)[0]
 
 
 def test_raw_newline_inside_json_string_is_accepted():
@@ -20,44 +30,47 @@ def test_raw_newline_inside_json_string_is_accepted():
     assert data["profile"]["age"] == 30 and "שורה שנייה" in data["reply"]
 
 
-def test_chat_step_survives_model_json_with_raw_newlines(monkeypatch):
+def test_plain_text_reply_is_returned_as_is(monkeypatch):
+    monkeypatch.setattr(agent, "client", fake_client("  כדאי להתחיל מקרן חירום.\nמה הגיל שלך?  "))
+    reply, profile = agent.chat_step([{"role": "user", "content": "היי"}], InvestorProfile(age=5))
+    assert reply == "כדאי להתחיל מקרן חירום.\nמה הגיל שלך?" and profile.age == 5
+
+
+def test_json_reply_is_extracted_and_profile_field_is_ignored(monkeypatch):
     monkeypatch.setattr(agent, "client", fake_client('{"reply": "היי\nמה שלומך?", "profile": {"age": 41}}'))
     reply, profile = agent.chat_step([{"role": "user", "content": "היי"}], InvestorProfile())
-    assert "מה שלומך" in reply and profile.age == 41
+    assert reply == "היי\nמה שלומך?" and profile.age is None
 
 
-def test_broken_json_still_shows_the_reply_text(monkeypatch, capsys):
-    broken = '{"reply": "כדאי להתחיל מקרן חירום", "profile": {"age": 30,, }'
+def test_json_in_code_fence_is_extracted(monkeypatch):
+    monkeypatch.setattr(agent, "client", fake_client('```json\n{"reply": "שלום"}\n```'))
+    reply, _ = agent.chat_step([{"role": "user", "content": "היי"}], InvestorProfile())
+    assert reply == "שלום"
+
+
+def test_broken_json_still_shows_the_reply_text(monkeypatch):
+    broken = '{"reply": "כדאי להתחיל \\"בקטן\\"", "profile": {"age": 30,, }'
     monkeypatch.setattr(agent, "client", fake_client(broken))
     reply, profile = agent.chat_step([{"role": "user", "content": "היי"}], InvestorProfile(age=5))
-    assert reply == "כדאי להתחיל מקרן חירום" and profile.age == 5
-    assert "לא ניתן לפענח" in capsys.readouterr().out
+    assert reply == 'כדאי להתחיל "בקטן"' and profile.age == 5
 
 
-def sequence_client(*contents):
-    items = list(contents)
-
-    def create(**kwargs):
-        content = items.pop(0) if len(items) > 1 else items[0]
-        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content, tool_calls=None))])
-
-    return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
-
-
-def test_plain_text_is_shown_when_repair_also_fails(monkeypatch):
-    monkeypatch.setattr(agent, "client", fake_client("סתם טקסט בלי JSON"))
-    reply, profile = agent.chat_step([{"role": "user", "content": "היי"}], InvestorProfile(age=5))
-    assert reply == "סתם טקסט בלי JSON" and profile.age == 5
-
-
-def test_repair_call_recovers_reply_and_profile(monkeypatch):
-    fixed = '{"reply": "כדאי להתחיל בקרן חירום", "profile": {"age": 30}}'
-    monkeypatch.setattr(agent, "client", sequence_client("כדאי להתחיל בקרן חירום", fixed))
+def test_repair_call_is_never_made(monkeypatch):
+    client, calls = counting_client("טקסט חופשי בלי JSON", '{"reply": "תיקון", "profile": {"age": 30}}')
+    monkeypatch.setattr(agent, "client", client)
     reply, profile = agent.chat_step([{"role": "user", "content": "אני בן 30"}], InvestorProfile())
-    assert reply == "כדאי להתחיל בקרן חירום" and profile.age == 30
+    assert reply == "טקסט חופשי בלי JSON" and profile.age is None
+    assert len(calls) == 1
 
 
-def test_broken_json_object_without_reply_gets_generic_message(monkeypatch):
+def test_broken_json_object_without_reply_gets_generic_message(monkeypatch, capsys):
     monkeypatch.setattr(agent, "client", fake_client('{"profile": {"age": 30,, }'))
+    reply, profile = agent.chat_step([{"role": "user", "content": "היי"}], InvestorProfile())
+    assert reply == agent.FALLBACK_REPLY and profile.age is None
+    assert "בלי reply" in capsys.readouterr().out
+
+
+def test_empty_reply_gets_generic_message(monkeypatch):
+    monkeypatch.setattr(agent, "client", fake_client(None))
     reply, _ = agent.chat_step([{"role": "user", "content": "היי"}], InvestorProfile())
-    assert "לנסח" in reply
+    assert reply == agent.FALLBACK_REPLY

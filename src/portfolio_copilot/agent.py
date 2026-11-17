@@ -1,3 +1,4 @@
+import datetime
 import os
 import json
 import re
@@ -155,8 +156,10 @@ def chat_step(messages_history: list[dict], current_profile: InvestorProfile,
     def profile_message(profile: InvestorProfile) -> dict:
         return {"role": "system", "content": f"פרופיל נוכחי שנאסף עד כה:\n{profile.model_dump_json()}"}
 
+    today_line = (f"התאריך היום: {datetime.date.today().isoformat()}. השתמש בו לכל חישוב של כמה שנים נשארו "
+                  "עד שנה עתידית, ואל תניח שהשנה היא שנת האימון שלך.")
     prompt_messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": f"{SYSTEM_PROMPT}\n{today_line}"},
         profile_message(current_profile),
     ]
     prompt_messages.extend(messages_history)

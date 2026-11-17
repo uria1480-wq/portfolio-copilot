@@ -34,7 +34,9 @@ def build_picture(answers: IntakeAnswers, holdings_value: float | None, reports:
     def add(label, value, source):
         items.append({"label": label, "value": value, "source": source})
 
-    add("כסף נזיל וחסכונות בבנק", answers.liquid_savings, "ראיון" if answers.liquid_savings is not None else None)
+    add("כסף נזיל וחסכונות בבנק", answers.liquid_savings, "הזנה ידנית" if answers.liquid_savings is not None else None)
+    if answers.liquid_savings is None:
+        gaps.append("לא הוזן כסף נזיל וחסכונות בבנק")
     add("תיק השקעות", holdings_value, "קובץ החזקות" if holdings_value is not None else None)
     for label, key, manual in (("קרן פנסיה", "pension", answers.pension_value),
                                ("קרן השתלמות", "study_fund", answers.study_fund_value)):

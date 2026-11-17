@@ -376,6 +376,35 @@ def stages_html(done: dict) -> str:
     return '<div class="pc-steps">' + "".join(chips) + "</div>"
 
 
+# השדות ש-InvestorProfile.missing_fields() מחזיר, בסדר שהסוכן שואל עליהם
+PROFILE_FIELD_LABELS = {
+    "age": "גיל או שלב בחיים",
+    "investment_horizon_years": "אופק השקעה",
+    "recommended_risk_level": "רמת סיכון מוצעת",
+    "risk_confirmed": "אישור רמת הסיכון",
+    "monthly_deposit": "הפקדה חודשית",
+}
+
+
+def intake_progress_html(profile: InvestorProfile) -> str:
+    """מה כבר נאסף בשיחת ההיכרות ומה עוד חסר. הנתונים מגיעים מהפרופיל השמור, לא מהמודל."""
+    missing = set(profile.missing_fields())
+    if not profile.risk_confirmed:  # missing_fields מדלג על האישור כל עוד אין רמת סיכון
+        missing.add("risk_confirmed")
+    if not missing:
+        head = banner_html("✅ הפרופיל מלא ונשמר. אפשר לעבור לשלב הבא: המצב שלי.")
+        status = '<span class="pc-chip pc-chip-ok">הושלם</span>'
+    else:
+        head = ""
+        status = f'<span class="pc-chip pc-chip-wait">חסרים {len(missing)}</span>'
+    chips = "".join(
+        f'<span class="pc-chip {"pc-chip-wait" if key in missing else "pc-chip-ok"}">'
+        f'{"◯" if key in missing else "✓"} {esc(label)}</span>'
+        for key, label in PROFILE_FIELD_LABELS.items())
+    return head + ('<div class="pc-card"><div class="pc-card-head"><h3>התקדמות ההיכרות</h3>' + status + "</div>"
+                   f'<div class="pc-chips">{chips}</div></div>')
+
+
 def intake_result_html(level: str, reasons: list[str], prefix: str = "") -> str:
     head = banner_html(prefix)
     cls = RISK_CLASS.get(level, "pc-chip-idle")
@@ -392,9 +421,8 @@ def picture_html(pic: dict, prefix: str = "") -> str:
         f'<tr><td>{esc(i["label"])}</td><td>{_money(i["value"]) if i["value"] is not None else "—"}</td>'
         f'<td>{_chips([i["source"]]) if i["source"] else ""}</td></tr>' for i in pic["items"])
     total = f'<div class="pc-total">{_money(pic["total"])}</div>' if pic.get("total") is not None else '<div class="pc-empty">עדיין אין נתונים לסיכום.</div>'
-    metrics = []
-    if pic.get("monthly_net_income") is not None:
-        metrics.append(_field("הכנסה נטו חודשית", _value(_money(pic["monthly_net_income"]))))
+    income = pic.get("monthly_net_income")
+    metrics = [_field("הכנסה נטו חודשית", _value(_money(income)) if income is not None else _value("—", muted=True))]
     if pic.get("savings_rate") is not None:
         metrics.append(_field("שיעור הפרשה מהנטו", _value(f'{pic["savings_rate"] * 100:.0f}%')))
     if pic.get("emergency_months") is not None:

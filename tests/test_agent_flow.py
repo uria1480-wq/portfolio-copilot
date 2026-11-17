@@ -77,6 +77,25 @@ def test_bad_json_keeps_profile(monkeypatch):
     assert profile == p and reply == "לא JSON"
 
 
+def test_system_message_includes_today(monkeypatch):
+    import datetime
+
+    class FakeDate(datetime.date):
+        @classmethod
+        def today(cls):
+            return cls(2031, 2, 3)
+
+    monkeypatch.setattr(agent, "datetime", SimpleNamespace(date=FakeDate))
+    fake = FakeClient([Msg(content=FINAL)])
+    monkeypatch.setattr(agent, "client", fake)
+    s, uid = store_with_holding()
+    agent.chat_step([{"role": "user", "content": "אני רוצה דירה ב-2040"}], InvestorProfile(), s, uid)
+    system = [m["content"] for m in fake.calls[0]["messages"] if m["role"] == "system"]
+    expected = ("התאריך היום: 2031-02-03. השתמש בו לכל חישוב של כמה שנים נשארו עד שנה עתידית, "
+                "ואל תניח שהשנה היא שנת האימון שלך.")
+    assert any(expected in content for content in system)
+
+
 def test_endless_tool_calls_terminate(monkeypatch):
     fake = FakeClient([Msg(tool_calls=[Call("c", "get_portfolio")])])
     monkeypatch.setattr(agent, "client", fake)

@@ -1,3 +1,4 @@
+import argparse
 import inspect
 
 import gradio as gr
@@ -455,8 +456,23 @@ def build_demo(store: Store, user_id: int, kb=None, kb_error=None):
 
     return demo, supported(gr.Blocks.launch, inbrowser=True, **launch_kwargs)
 
-def main():
-    store = Store()
+def parse_args(argv=None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Portfolio Copilot")
+    parser.add_argument("--fresh", action="store_true",
+                        help="מסד נתונים בזיכרון בלבד: כל הרצה מתחילה נקייה ושום דבר לא נשמר ב-data/portfolio.db")
+    return parser.parse_args(argv)
+
+
+def open_store(fresh: bool) -> Store:
+    """עם --fresh: מסד בזיכרון שנעלם בסוף ההרצה. בלי: הקובץ הרגיל data/portfolio.db."""
+    return Store(":memory:") if fresh else Store()
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    store = open_store(args.fresh)
+    if args.fresh:
+        print("[app] --fresh: מסד נתונים בזיכרון. שום דבר מההרצה הזו לא יישמר.")
     user_id = store.get_or_create_user(USER_NAME)
 
     kb, kb_error = None, None

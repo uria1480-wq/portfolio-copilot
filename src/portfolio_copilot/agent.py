@@ -42,6 +42,8 @@ SYSTEM_PROMPT = """אתה Portfolio Copilot – מתכנן ומאפיין פינ
 - בכל פעם שהמשתמש מוסר פרט על עצמו, קרא ל-update_profile עם השדות שאמר, לפני שאתה עונה.
 - אם שדה הגיע ב-rejected, הסבר בקצרה למה ובקש אותו שוב.
 - אם complete=false, שאל שאלה אחת בלבד, על השדה שב-next_field. אם complete=true, אל תשאל עוד שאלות פרופיל.
+- אם המשתמש אומר שהוא לא יודע, העבר את השדה ב-unknown_fields. אם הוא אומר שאין לו (למשל אין חובות), העבר אותו
+  ב-none_fields. אל תמציא מספר ואל תכתוב 0 בעצמך. שדה כזה נרשם ולא תישאל עליו שוב.
 
 כלים שעומדים לרשותך:
 - update_profile: שמירת פרטי פרופיל, עם בדיקה בקוד. מחזיר accepted, rejected, missing, next_field ו-complete.
@@ -202,7 +204,10 @@ def chat_step(messages_history: list[dict], current_profile: InvestorProfile,
                     "tool_call_id": call.id,
                     "content": json.dumps(result, ensure_ascii=False),
                 })
-                tool_timings.append(f"{call.function.name} ({time.perf_counter() - tool_started:.2f}s)")
+                timing = f"{call.function.name} ({time.perf_counter() - tool_started:.2f}s)"
+                if call.function.name == "update_profile":
+                    timing += f" args={json.dumps(args, ensure_ascii=False)}"
+                tool_timings.append(timing)
             print(f"[agent] round {round_no + 1}: LLM {llm_seconds:.2f}s | tools: {', '.join(tool_timings)}")
 
         # הפרופיל כבר עודכן בכלים. התשובה הסופית היא טקסט בלבד ולא משנה אותו.

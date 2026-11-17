@@ -3,7 +3,8 @@ import re
 
 from portfolio_copilot.plan import SavingsPlan
 from portfolio_copilot.salary import plan_salary
-from portfolio_copilot.schemas import LIFE_STAGES, RISK_LEVELS, InvestorProfile, apply_profile_update
+from portfolio_copilot.schemas import (EMPLOYMENT_OPTIONS, LIFE_STAGES, MARITAL_OPTIONS, NONE_ALLOWED, RISK_LEVELS,
+                                       UNKNOWN_ALLOWED, InvestorProfile, apply_profile_update)
 from portfolio_copilot.tools import get_prices, plan_trades
 
 PROFILE_TOOL_SPECS = [
@@ -14,7 +15,10 @@ PROFILE_TOOL_SPECS = [
             "description": (
                 "שומר בפרופיל ערכים שהמשתמש אמר. כל ערך נבדק בקוד: התוצאה מחזירה מה התקבל (accepted), "
                 "מה נדחה ולמה (rejected), מה עוד חסר (missing) ואת השדה הבא לשאול עליו (next_field). "
-                "שלח רק שדות שהמשתמש אמר במפורש. risk_confirmed=true רק אם המשתמש אישר במפורש את רמת הסיכון."
+                "שלח רק שדות שהמשתמש אמר במפורש. risk_confirmed=true רק אם המשתמש אישר במפורש את רמת הסיכון. "
+                "אם המשתמש אמר שהוא לא יודע, שלח את שם השדה ב-unknown_fields. אם אמר שאין לו, שלח אותו ב-none_fields. "
+                "אל תמציא מספר או 0 בעצמך. הכנסת בן/בת הזוג נשאלת רק אם marital_status הוא נשוי או ידוע בציבור. "
+                "אם המשתמש אמר שבן/בת הזוג לא עובד/ת או בלי הכנסה, שלח spouse_monthly_net_income ב-none_fields."
             ),
             "parameters": {
                 "type": "object",
@@ -31,6 +35,27 @@ PROFILE_TOOL_SPECS = [
                     "max_single_asset_weight": {"type": "number", "description": "תקרת משקל לנכס בודד, 0.05 עד 1"},
                     "relevant_vehicles": {"type": "array", "items": {"type": "string"}},
                     "agent_reasoning": {"type": "string", "description": "נימוק קצר לרמת הסיכון"},
+                    "marital_status": {"type": "string", "enum": list(MARITAL_OPTIONS)},
+                    "spouse_monthly_net_income": {
+                        "type": "number",
+                        "description": "הכנסה נטו חודשית של בן/בת הזוג בשקלים, לא שלילית. רק לנשוי או ידוע בציבור",
+                    },
+                    "employment_status": {"type": "string", "enum": list(EMPLOYMENT_OPTIONS)},
+                    "monthly_net_income": {"type": "number", "description": "הכנסה נטו חודשית בשקלים, לא שלילית"},
+                    "monthly_expenses": {"type": "number", "description": "הוצאות חודשיות בשקלים, לא שליליות"},
+                    "liquid_savings": {"type": "number", "description": "כסף נזיל וחסכונות בבנק בשקלים, לא שלילי"},
+                    "monthly_debt_payments": {"type": "number", "description": "החזרי הלוואות או משכנתא בחודש, לא שליליים"},
+                    "pension_balance": {"type": "number", "description": "יתרה בקרן הפנסיה, לא שלילית"},
+                    "study_fund_balance": {"type": "number", "description": "יתרה בקרן ההשתלמות, לא שלילית"},
+                    "other_assets": {"type": "number", "description": "שווי נכסים אחרים, לא שלילי"},
+                    "unknown_fields": {
+                        "type": "array", "items": {"type": "string", "enum": list(UNKNOWN_ALLOWED)},
+                        "description": "שדות שהמשתמש אמר שהוא לא יודע. נרשמים ולא נשאלים שוב",
+                    },
+                    "none_fields": {
+                        "type": "array", "items": {"type": "string", "enum": list(NONE_ALLOWED)},
+                        "description": "שדות שהמשתמש אמר עליהם במפורש שאין לו. רק שדות שנאמרו. הקוד רושם 0",
+                    },
                 },
                 "required": [],
             },

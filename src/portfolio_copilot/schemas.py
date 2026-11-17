@@ -51,6 +51,23 @@ class InvestorProfile(BaseModel):
         default_factory=list, description="סימולים שהמשתמש אמר שלא ימכור. נאכף בקוד בכל חישוב מכירה"
     )
 
+    # תמונת המצב הפיננסית מהראיון (תרחיש 2). סכומים בשקלים, לא שליליים.
+    marital_status: Optional[str] = Field(default=None, description="מצב משפחתי")
+    spouse_monthly_net_income: Optional[float] = Field(
+        default=None, ge=0, description="הכנסה נטו חודשית של בן/בת הזוג. נדרשת רק לנשוי או ידוע בציבור"
+    )
+    employment_status: Optional[str] = Field(default=None, description="מצב תעסוקתי")
+    monthly_net_income: Optional[float] = Field(default=None, ge=0, description="הכנסה נטו חודשית")
+    monthly_expenses: Optional[float] = Field(default=None, ge=0, description="הוצאות חודשיות")
+    liquid_savings: Optional[float] = Field(default=None, ge=0, description="כסף נזיל וחסכונות בבנק")
+    monthly_debt_payments: Optional[float] = Field(default=None, ge=0, description="החזרי חובות בחודש")
+    pension_balance: Optional[float] = Field(default=None, ge=0, description="יתרה בקרן הפנסיה")
+    study_fund_balance: Optional[float] = Field(default=None, ge=0, description="יתרה בקרן ההשתלמות")
+    other_assets: Optional[float] = Field(default=None, ge=0, description="נכסים אחרים")
+    unknown_fields: List[str] = Field(
+        default_factory=list, description="שדות שהמשתמש אמר שהוא לא יודע. לא נשאלים שוב"
+    )
+
     def is_complete(self) -> bool:
         """מוכן להרצת מנוע החישוב: יש גיל/שלב, אופק, ורמת סיכון שהמשתמש אישר"""
         return all([
@@ -60,28 +77,49 @@ class InvestorProfile(BaseModel):
             self.investment_horizon_years is not None,
         ])
 
+    def spouse_income_required(self) -> bool:
+        """הכנסת בן/בת הזוג נשאלת רק לנשוי או ידוע בציבור."""
+        return self.marital_status in PARTNERED_STATUSES
+
     def missing_fields(self) -> list[str]:
-        """מה עוד חסר כדי שהפרופיל יהיה מלא, בסדר שבו כדאי לשאול (שאלה אחת בכל פעם)."""
+        """מה עוד חסר כדי שהראיון יהיה מלא, בסדר קבוע שבו שואלים (שאלה אחת בכל פעם).
+        שדה נחשב נענה אם יש לו ערך, או שהמשתמש אמר שהוא לא יודע (unknown_fields)."""
         missing = []
         if self.age is None and self.life_stage is None:
             missing.append("age")
-        if self.investment_horizon_years is None:
-            missing.append("investment_horizon_years")
+        for field in INTERVIEW_FIELDS:
+            if field == "spouse_monthly_net_income" and not self.spouse_income_required():
+                continue
+            if getattr(self, field) is None and field not in self.unknown_fields:
+                missing.append(field)
         if self.recommended_risk_level is None:
             missing.append("recommended_risk_level")
         elif not self.risk_confirmed:
             missing.append("risk_confirmed")
-        if self.monthly_deposit is None:
-            missing.append("monthly_deposit")
         return missing
 
 
 LIST_FIELDS = ("relevant_vehicles", "restrictions")
-# שדות שמשתנים רק דרך כלי ייעודי (add_restriction), ולא דרך ה-JSON החופשי של המודל
-PROTECTED_FIELDS = ("no_sell_symbols",)
+# שדות שמשתנים רק דרך כלי ייעודי (add_restriction, update_profile), ולא דרך ה-JSON החופשי של המודל
+PROTECTED_FIELDS = ("no_sell_symbols", "unknown_fields")
 
 LIFE_STAGES = ("נוער", "סטודנט", "משפחה צעירה", "לקראת פרישה", "פנסיונר")
 RISK_LEVELS = ("שמרני", "מאוזן", "אגרסיבי")
+EMPLOYMENT_OPTIONS = ("שכיר/ה", "עצמאי/ת", "לא עובד/ת", "סטודנט/ית", "חייל/ת", "פנסיונר/ית", "תלמיד/ה")
+MARITAL_OPTIONS = ("רווק", "נשוי", "ידוע בציבור", "גרוש", "אלמן")
+PARTNERED_STATUSES = ("נשוי", "ידוע בציבור")
+AMOUNT_FIELDS = ("spouse_monthly_net_income", "monthly_net_income", "monthly_expenses", "liquid_savings",
+                 "monthly_debt_payments", "pension_balance", "study_fund_balance", "other_assets")
+
+# סדר השאלות בראיון אחרי הגיל ולפני רמת הסיכון (תרחיש 2 ב-design/mvp.md)
+INTERVIEW_FIELDS = ("marital_status", "spouse_monthly_net_income", "employment_status", "monthly_net_income", "monthly_expenses", "monthly_deposit",
+                    "liquid_savings", "monthly_debt_payments", "pension_balance", "study_fund_balance",
+                    "other_assets", "investment_goal", "investment_horizon_years")
+
+# על אילו שדות אפשר לענות "לא יודע" ועל אילו "אין"
+UNKNOWN_ALLOWED = ("employment_status", *AMOUNT_FIELDS, "investment_goal")
+NONE_ALLOWED = (*AMOUNT_FIELDS, "investment_goal")
+GOAL_NONE_TEXT = "אין יעד מוגדר"
 
 
 def _number(value, low=None, high=None, integer=False):
@@ -137,7 +175,19 @@ PROFILE_VALIDATORS = {
     "risk_confirmed": _bool,
     "max_single_asset_weight": lambda v: _number(v, 0.05, 1.0),
     "agent_reasoning": _text,
+    "employment_status": _choice(EMPLOYMENT_OPTIONS),
+    "marital_status": _choice(MARITAL_OPTIONS),
+    **{field: (lambda v: _number(v, 0)) for field in AMOUNT_FIELDS},
 }
+
+
+def _field_list(value):
+    """רשימת שמות שדות מהמודל. מחזיר (רשימה, None) או (None, סיבה)."""
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
+        return None, "צריך להיות רשימה של שמות שדות"
+    return list(dict.fromkeys(x.strip() for x in value if x.strip())), None
 
 
 def apply_profile_update(current: InvestorProfile, patch: dict) -> tuple[InvestorProfile, dict, dict]:
@@ -145,13 +195,31 @@ def apply_profile_update(current: InvestorProfile, patch: dict) -> tuple[Investo
 
     מחזיר (פרופיל חדש, מה התקבל, מה נדחה וסיבה). ערך null מדולג. שדה לא מוכר נדחה.
     שינוי רמת סיכון מאפס את האישור, ואישור סיכון נדחה כשאין רמת סיכון.
+
+    unknown_fields: שדות שהמשתמש אמר שהוא לא יודע. הערך נשאר ריק והשדה לא נשאל שוב.
+    none_fields: שדות שהמשתמש אמר שאין לו. הקוד רושם 0 לסכום, ו"אין יעד מוגדר" ליעד.
+    שדה שמגיע באותה קריאה גם עם ערך וגם כ"לא יודע"/"אין" נדחה כולו.
     """
     patch = patch if isinstance(patch, dict) else {}
     data = current.model_dump()
     accepted, rejected = {}, {}
 
+    markers = {}
+    for key in ("unknown_fields", "none_fields"):
+        if patch.get(key) is None:
+            markers[key] = []
+            continue
+        names, reason = _field_list(patch[key])
+        if reason:
+            rejected[key] = reason
+        markers[key] = names or []
+    conflicts = ({k for k in markers["unknown_fields"] + markers["none_fields"] if patch.get(k) is not None}
+                 | (set(markers["unknown_fields"]) & set(markers["none_fields"])))
+    for name in conflicts:
+        rejected[name] = "התקבלו לאותו שדה גם ערך וגם 'לא יודע' או 'אין'. שאל שוב"
+
     for key, value in patch.items():
-        if value is None or key == "risk_confirmed":
+        if value is None or key in ("risk_confirmed", "unknown_fields", "none_fields") or key in conflicts:
             continue
         if key == "relevant_vehicles":
             items = [value] if isinstance(value, str) else value
@@ -173,6 +241,31 @@ def apply_profile_update(current: InvestorProfile, patch: dict) -> tuple[Investo
             continue
         data[key] = clean
         accepted[key] = clean
+        if key in data["unknown_fields"]:  # ערך אמיתי מחליף "לא יודע"
+            data["unknown_fields"] = [f for f in data["unknown_fields"] if f != key]
+
+    for name in markers["none_fields"]:
+        if name in conflicts:
+            continue
+        if name not in NONE_ALLOWED:
+            rejected[name] = "אי אפשר לענות 'אין' על השדה הזה"
+            continue
+        data[name] = GOAL_NONE_TEXT if name == "investment_goal" else 0.0
+        data["unknown_fields"] = [f for f in data["unknown_fields"] if f != name]
+        accepted[name] = data[name]
+
+    for name in markers["unknown_fields"]:
+        if name in conflicts:
+            continue
+        if name not in UNKNOWN_ALLOWED:
+            rejected[name] = "אי אפשר לענות 'לא יודע' על השדה הזה. צריך ערך"
+            continue
+        if data[name] is not None:
+            rejected[name] = "כבר יש לשדה ערך. אם הוא השתנה, שלח את הערך החדש"
+            continue
+        if name not in data["unknown_fields"]:
+            data["unknown_fields"] = [*data["unknown_fields"], name]
+        accepted[name] = "unknown"
 
     if data["recommended_risk_level"] != current.recommended_risk_level:
         data["risk_confirmed"] = False

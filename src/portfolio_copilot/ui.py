@@ -379,10 +379,21 @@ def stages_html(done: dict) -> str:
 # השדות ש-InvestorProfile.missing_fields() מחזיר, בסדר שהסוכן שואל עליהם
 PROFILE_FIELD_LABELS = {
     "age": "גיל או שלב בחיים",
+    "marital_status": "מצב משפחתי",
+    "spouse_monthly_net_income": "הכנסת בן/בת זוג",
+    "employment_status": "מצב תעסוקתי",
+    "monthly_net_income": "הכנסה נטו חודשית",
+    "monthly_expenses": "הוצאות חודשיות",
+    "monthly_deposit": "הפקדה חודשית",
+    "liquid_savings": "כסף נזיל",
+    "monthly_debt_payments": "החזרי חובות",
+    "pension_balance": "יתרת פנסיה",
+    "study_fund_balance": "יתרת השתלמות",
+    "other_assets": "נכסים אחרים",
+    "investment_goal": "יעד",
     "investment_horizon_years": "אופק השקעה",
     "recommended_risk_level": "רמת סיכון מוצעת",
     "risk_confirmed": "אישור רמת הסיכון",
-    "monthly_deposit": "הפקדה חודשית",
 }
 
 
@@ -400,7 +411,8 @@ def intake_progress_html(profile: InvestorProfile) -> str:
     chips = "".join(
         f'<span class="pc-chip {"pc-chip-wait" if key in missing else "pc-chip-ok"}">'
         f'{"◯" if key in missing else "✓"} {esc(label)}</span>'
-        for key, label in PROFILE_FIELD_LABELS.items())
+        for key, label in PROFILE_FIELD_LABELS.items()
+        if key != "spouse_monthly_net_income" or profile.spouse_income_required())
     return head + ('<div class="pc-card"><div class="pc-card-head"><h3>התקדמות ההיכרות</h3>' + status + "</div>"
                    f'<div class="pc-chips">{chips}</div></div>')
 

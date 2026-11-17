@@ -449,6 +449,27 @@ def picture_html(pic: dict, prefix: str = "") -> str:
                    '<table class="pc-table"><tr><th>נכס</th><th>שווי</th><th>מקור</th></tr>' + rows + "</table>" + grid + gaps + "</div>")
 
 
+def situation_html(view: dict, prefix: str = "") -> str:
+    """מציג את תמונת המצב של שלב 2 (situation.build_situation). הערכים והמקורות כבר מחושבים שם."""
+    head = banner_html(prefix)
+    total = (f'<div class="pc-total">{_money(view["total"])}</div>' if view.get("total") is not None
+             else '<div class="pc-empty">עדיין אין נכסים ידועים לסיכום.</div>')
+    body = ""
+    for section in view["sections"]:
+        rows = "".join(
+            f'<tr><td>{esc(r["label"])}</td>'
+            f'<td>{_value(r["display"], muted=r["value"] is None)}</td>'
+            f'<td>{_chips([r["source"]]) if r["source"] else ""}</td></tr>' for r in section["rows"])
+        body += (f'<div class="pc-section">{esc(section["title"])}</div>'
+                 '<table class="pc-table"><tr><th>נתון</th><th>ערך</th><th>מקור</th></tr>' + rows + "</table>")
+    gaps = ""
+    if view.get("gaps"):
+        gaps = ('<div class="pc-section">מה עוד חסר לתמונה מלאה</div><ul style="margin:0;padding-right:20px;line-height:1.8">'
+                + "".join(f"<li>{esc(g)}</li>" for g in view["gaps"]) + "</ul>")
+    return head + ('<div class="pc-card"><div class="pc-card-head"><h3>תמונת המצב שלי</h3>'
+                   '<span class="pc-chip pc-chip-idle">שווי נכסים ידוע</span></div>' + total + body + gaps + "</div>")
+
+
 def guidance_html(g: Guidance, prefix: str = "") -> str:
     head = banner_html(prefix)
     note = ('<div class="pc-banner pc-banner-info">ניתוח בסיסי שנגזר מהתשובות בקוד. הניתוח של המודל לא היה זמין.</div>'

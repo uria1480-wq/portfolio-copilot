@@ -14,10 +14,12 @@ from portfolio_copilot.plan import Bucket, SavingsPlan
 from portfolio_copilot.rag import KnowledgeBase, load_folder
 from portfolio_copilot.salary import plan_salary
 from portfolio_copilot.schemas import InvestorProfile
+from portfolio_copilot.situation import load_situation
 from portfolio_copilot.tools import parse_holdings_csv
 from portfolio_copilot.ui import (CSS, PROFILE_FIELD_LABELS, banner_html, documents_html, guidance_html, hero_html,
                                   holdings_html, intake_progress_html, knowledge_html, picture_html, plan_html,
-                                  profile_html, salary_history_html, salary_result_html, stages_html, supported)
+                                  profile_html, salary_history_html, salary_result_html, situation_html, stages_html,
+                                  supported)
 
 USER_NAME = "demo"  # בהמשך אפשר להחליף בהתחברות אמיתית; כל הקוד כבר עובד לפי user_id
 NOCHANGE = getattr(gr, "skip", gr.update)
@@ -184,16 +186,16 @@ def make_assets_handler(store: Store, user_id: int, fetch=None):
         try:
             IntakeAnswers(**values)  # אותה בדיקה כמו קודם: ערכים לא שליליים
         except ValueError:
-            return picture_html(compute_picture(store, user_id, fetch), prefix="❌ הערכים צריכים להיות חיוביים"), NOCHANGE()
+            return situation_html(load_situation(store, user_id, fetch), prefix="❌ הערכים צריכים להיות חיוביים"), NOCHANGE()
         store.save_state(user_id, "assets", values)
-        return picture_html(compute_picture(store, user_id, fetch), prefix="✅ הערכים נשמרו"), stages_html(stage_flags(store, user_id))
+        return situation_html(load_situation(store, user_id, fetch), prefix="✅ הערכים נשמרו"), stages_html(stage_flags(store, user_id))
 
     return save
 
 
 def make_refresh_handler(store: Store, user_id: int, fetch=None):
     def refresh():
-        return picture_html(compute_picture(store, user_id, fetch)), stages_html(stage_flags(store, user_id))
+        return situation_html(load_situation(store, user_id, fetch)), stages_html(stage_flags(store, user_id))
 
     return refresh
 
@@ -369,7 +371,7 @@ def build_demo(store: Store, user_id: int, kb=None, kb_error=None):
                         study_in = gr.Number(label="שווי קרן השתלמות (₪)", value=a["study_fund_value"])
                         other_in = gr.Number(label="נכסים אחרים (₪)", value=a["other_assets"])
                     assets_btn = gr.Button("שמור ערכים")
-                picture_display = gr.HTML(picture_html(compute_picture(store, user_id)))
+                picture_display = gr.HTML(situation_html(load_situation(store, user_id)))
                 with gr.Row():
                     refresh_btn = gr.Button("רענן תמונת מצב", variant="secondary")
                     to_analysis_btn = gr.Button("המשך לניתוח והדרכה", variant="primary")

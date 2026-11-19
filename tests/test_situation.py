@@ -5,7 +5,6 @@ os.environ.setdefault("OPENAI_API_KEY", "test-key")
 os.environ.setdefault("OPENAI_BASE_URL", "http://localhost")
 
 from portfolio_copilot.db import Store
-from portfolio_copilot.intake import IntakeAnswers
 from portfolio_copilot.schemas import InvestorProfile
 from portfolio_copilot.situation import build_situation, format_value, load_situation
 from portfolio_copilot.ui import situation_html
@@ -71,8 +70,7 @@ def test_spouse_income_row_only_when_partnered():
 def test_old_intake_and_old_manual_values_are_not_displayed():
     store = Store(":memory:")
     uid = store.get_or_create_user("demo")
-    store.save_state(uid, "intake", IntakeAnswers(monthly_net_income=20000, liquid_savings=50000,
-                                                  pension_value=5000).model_dump())
+    store.save_state(uid, "intake", {"monthly_net_income": 20000, "liquid_savings": 50000, "pension_value": 5000})
     store.save_state(uid, "assets", {"monthly_net_income": 18000, "liquid_savings": 30000, "pension_value": 7000})
     store.save_profile(uid, InvestorProfile(age=30))
     r = rows(load_situation(store, uid))

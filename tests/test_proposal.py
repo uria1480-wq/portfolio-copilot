@@ -123,14 +123,22 @@ def test_under_40_is_all_equity_regardless_of_table():
     assert (p.pension.pension_track, p.pension.study_fund_track) == ("100% מנייתי", "100% מנייתי")
 
 
-@pytest.mark.parametrize("level, years, track", [
-    ("מאוזן", 10, "כללי"),          # 55%
-    ("שמרני", 10, 'אג"ח/שמרני'),    # 30%
-    ("אגרסיבי", 20, "כללי"),        # 90% בטבלה, תקרה 110-45 = 65%
+@pytest.mark.parametrize("age, level, years, track", [
+    (45, "מאוזן", 10, "כללי"),          # 55%
+    (45, "שמרני", 10, 'אג"ח/שמרני'),    # 30%
+    (45, "אגרסיבי", 20, "מנייתי"),      # 90% בטבלה. תקרת הגיל (65%) לא חלה על פנסיה
+    (70, "אגרסיבי", 10, "כללי"),        # 75% בטבלה, תקרה 40% רק להון הנזיל
+    (60, "מאוזן", 16, "כללי"),          # 65%
 ])
-def test_from_40_track_follows_equity_percent(level, years, track):
-    p = build_proposal(person(age=45, recommended_risk_level=level, investment_horizon_years=years), TODAY)
+def test_from_40_track_follows_table_percent_without_age_cap(age, level, years, track):
+    p = build_proposal(person(age=age, recommended_risk_level=level, investment_horizon_years=years), TODAY)
     assert p.pension.pension_track == track == p.pension.study_fund_track
+
+
+def test_age_cap_applies_to_liquid_mix_but_not_to_pension():
+    p = build_proposal(person(age=70, recommended_risk_level="אגרסיבי", investment_horizon_years=20), TODAY)
+    assert p.capital.equity_percent == 40 and p.pension.pension_track == "מנייתי"
+    assert any("בלי תקרת גיל" in r and "90%" in r for r in p.reasons)
 
 
 def test_track_thresholds():
@@ -230,3 +238,91 @@ def test_app_handler_reads_saved_profile(monkeypatch):
     store.save_profile(uid, person())
     html = appmod.make_proposal_handler(store, uid)()
     assert "2. ההון הקיים" in html and "מה חסר" not in html
+
+
+# ---------- allocate_monthly ----------
+from portfolio_copilot.proposal import allocate_monthly  # noqa: E402
+
+
+def total(r):
+    return round(r.emergency_amount + sum(line.amount for line in r.lines or []) + r.unallocated, 2)
+
+
+def test_shortfall_bigger_than_deposit_goes_all_to_emergency():
+    r = allocate_monthly(person(liquid_savings=35000), 3000, TODAY)  # חסרים 25,000
+    assert r.emergency_amount == 3000 and r.lines == [] and total(r) == 3000
+    assert any("לכספית" in x for x in r.reasons)
+
+
+def test_partial_shortfall_then_mix():
+    r = allocate_monthly(person(liquid_savings=59000), 3000, TODAY)  # חסרים 1,000
+    amounts = {line.asset_class: line.amount for line in r.lines}
+    assert r.emergency_amount == 1000 and round(sum(amounts.values()), 2) == 2000
+    assert amounts[US_EQUITY] == 550 and total(r) == 3000
+
+
+def test_no_shortfall_all_by_mix_long_horizon():
+    r = allocate_monthly(person(), 10000, TODAY)  # 55% מניות, אופק 10
+    amounts = {line.asset_class: line.amount for line in r.lines}
+    assert r.emergency_amount == 0
+    assert amounts == {US_EQUITY: 2750, WORLD_EQUITY: 2750, GOV_BONDS: 1575, CORP_BONDS: 1575, MONEY_MARKET: 1350}
+
+
+def test_short_horizon_mix():
+    r = allocate_monthly(person(investment_horizon_years=2), 10000, TODAY)  # 10% מניות
+    amounts = {line.asset_class: line.amount for line in r.lines}
+    assert amounts == {US_EQUITY: 500, WORLD_EQUITY: 500, GOV_BONDS: 1800, CORP_BONDS: 1800, MONEY_MARKET: 5400}
+
+
+@pytest.mark.parametrize("deposit", [1, 99.99, 1234.57, 3333.33, 10000, 77777.77])
+@pytest.mark.parametrize("liquid", [0, 59999.5, 80000])
+def test_amounts_always_sum_to_the_deposit(deposit, liquid):
+    r = allocate_monthly(person(liquid_savings=liquid), deposit, TODAY)
+    assert total(r) == round(deposit, 2) and all(line.amount >= 0 for line in r.lines)
+
+
+@pytest.mark.parametrize("field", ["age", "recommended_risk_level", "investment_horizon_years"])
+def test_missing_profile_gives_emergency_only(field):
+    r = allocate_monthly(person(liquid_savings=59000, **{field: None}), 3000, TODAY)
+    assert field in r.missing and r.lines is None
+    assert r.emergency_amount == 1000 and r.unallocated == 2000 and total(r) == 3000
+
+
+def test_unconfirmed_risk_gives_emergency_only():
+    r = allocate_monthly(person(risk_confirmed=False), 3000, TODAY)
+    assert "risk_confirmed" in r.missing and r.lines is None and r.unallocated == 3000
+
+
+def test_unknown_expenses_skip_emergency_and_are_listed():
+    r = allocate_monthly(person(monthly_expenses=None), 3000, TODAY)
+    assert "monthly_expenses" in r.missing and r.emergency_amount == 0 and total(r) == 3000
+
+
+def test_deposit_must_be_positive():
+    for bad in (0, -5, None):
+        with pytest.raises(ValueError):
+            allocate_monthly(person(), bad, TODAY)
+
+
+# ---------- monthly_report ----------
+from portfolio_copilot.proposal import monthly_report  # noqa: E402
+
+
+def test_monthly_report_fixed_and_percent():
+    fixed = monthly_report(person(), 20000, 2000, 800, "fixed", 3000, TODAY)
+    assert (fixed.period, fixed.set_aside, fixed.free_to_spend, fixed.total_saved_this_month) == ("2026-11", 3000, 17000, 5800)
+    pct = monthly_report(person(), 20000, None, None, "percent", 15, TODAY)
+    assert pct.set_aside == 3000 and pct.pension_contributions == 0 and "15%" in pct.allocation.reasons[0]
+
+
+@pytest.mark.parametrize("args, message", [
+    ((0, None, None, "fixed", 100), "נטו"),
+    ((1000, -1, None, "fixed", 100), "שליליות"),
+    ((1000, None, None, "fixed", 0), "כמה להשקיע"),
+    ((1000, None, None, "percent", 120), "100%"),
+    ((1000, None, None, "fixed", 2000), "גבוה מהנטו"),
+    ((1000, None, None, "other", 100), "לא מוכר"),
+])
+def test_monthly_report_rejects_bad_input(args, message):
+    with pytest.raises(ValueError, match=message):
+        monthly_report(person(), *args, today=TODAY)

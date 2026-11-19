@@ -1,4 +1,4 @@
-"""בדיקת המסע המלא דרך הפונקציות של הממשק: שיחת היכרות, תמונת מצב, ניתוח, אישור ומשכורת."""
+"""בדיקת המסע המלא דרך הפונקציות של הממשק: שיחת היכרות, תמונת מצב, הצעה ודיווח חודשי."""
 import json
 import os
 
@@ -15,23 +15,10 @@ from test_agent_flow import Call, FakeClient, Msg
 from portfolio_copilot import agent
 from portfolio_copilot import app as appmod
 from portfolio_copilot.db import Store
-from portfolio_copilot.intake import HORIZON_OPTIONS, IntakeAnswers
 from portfolio_copilot.schemas import InvestorProfile
 from portfolio_copilot.ui import intake_progress_html
 
 FETCH = lambda symbol: 100.0
-GUIDANCE = {"summary": "מצב יציב", "risk_level": "מאוזן", "risk_reasoning": "אופק בינוני",
-            "steps": [{"title": "להפריש כל חודש", "why": "הרגל"}],
-            "plan": {"savings_mode": "fixed", "savings_value": 10000, "rationale": "מתאים",
-                     "buckets": [{"name": "קרן חירום", "kind": "cash", "share": 0.3}, {"name": "השקעות", "kind": "invest", "share": 0.7}]}}
-
-
-def llm(content):
-    msg = SimpleNamespace(content=content)
-    return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
-        create=lambda **kw: SimpleNamespace(choices=[SimpleNamespace(message=msg)]))))
-
-
 def new_store():
     store = Store(":memory:")
     return store, store.get_or_create_user("demo")
@@ -98,27 +85,19 @@ def test_full_journey(monkeypatch):
     assert appmod.stage_flags(store, uid)["intake"] and "pc-step-done" in stages
     assert store.load_profile(uid) == profile
 
-    # 2. המצב שלי: החזקות ומסמך נכנסים לתמונה אחת
-    store.upsert_holding(uid, "VT", 100)
-    store.save_document(uid, {"doc_type": "fund_report", "period": "2026-Q1", "data": {}, "warnings": [],
-                              "summary": {"fund_type": "pension", "fund_name": "קרן", "provider": "חברה", "balance_end": 200000.0}})
+    # 2. המצב שלי: מהפרופיל בלבד
     assert appmod.stage_flags(store, uid)["picture"]
 
-    # 3. ניתוח ואישור
-    analysis = appmod.make_analysis_handler(store, uid, llm(json.dumps(GUIDANCE, ensure_ascii=False)), "m")()
-    assert "מצב יציב" in analysis[0] and analysis[1] == "מאוזן" and analysis[3] == 10000
-    assert appmod.stage_flags(store, uid)["analysis"] and not appmod.stage_flags(store, uid)["monthly"]
-    confirm = appmod.make_confirm_handler(store, uid)("מאוזן", "סכום קבוע בשקלים", 10000, 30, 40000)
-    assert "התוכנית אושרה" in confirm[0] and "הפרופיל מלא ונשמר" in confirm[6]
-    saved = store.load_profile(uid)
-    assert store.load_plan(uid).is_ready() and saved.is_complete()
-    assert saved.no_sell_symbols == ["ZIM"] and saved.age == 35  # האישור לא דורס את מה שנאסף בשיחה
-    assert appmod.stage_flags(store, uid) == {"intake": True, "picture": True, "analysis": True, "monthly": True}
+    # 2א. קבל הצעה: נבנית בקוד מהפרופיל
+    proposal = appmod.make_proposal_handler(store, uid)()
+    assert "1. ביטחון" in proposal and "2. ההון הקיים" in proposal and "3. פנסיה והשתלמות" in proposal
+    assert appmod.stage_flags(store, uid) == {"intake": True, "picture": True, "monthly": False}
 
-    # 4. ניהול חודשי: נכנסה משכורת
-    html = appmod.make_salary_handler(store, uid, FETCH)(40000, 4000, 2500)
-    assert "מה לעשות עם ₪10,000" in html and "העבר" in html and "קנה" in html and "₪16,500" in html
+    # 3. ניהול חודשי: הדיווח החודשי מחולק לפי הפרופיל
+    html = appmod.make_monthly_handler(store, uid)(40000, 4000, 2500, "סכום בשקלים", 10000)
+    assert "מה לעשות עם ₪10,000" in html and "קרן חירום" in html and "₪16,500" in html and "למה" in html
     assert len(store.list_salary_events(uid)) == 1
+    assert appmod.stage_flags(store, uid) == {"intake": True, "picture": True, "monthly": True}
 
 
 def test_rejected_value_is_not_saved(monkeypatch):
@@ -155,101 +134,6 @@ def test_model_error_keeps_profile_and_shows_message(monkeypatch):
 def test_opening_message_depends_on_profile():
     assert appmod.intake_opening(InvestorProfile())[0]["content"] == appmod.INTAKE_GREETING
     assert appmod.intake_opening(complete_profile())[0]["content"] == appmod.INTAKE_DONE_GREETING
-
-
-def test_analysis_before_interview_is_blocked_and_confirm_needs_a_risk_level():
-    store, uid = new_store()
-    out = appmod.make_analysis_handler(store, uid, llm("{}"), "m")()
-    assert "השלם קודם את שיחת ההיכרות" in out[0] and "גיל" in out[0]
-    assert "השלם קודם" in appmod.make_confirm_handler(store, uid)("מאוזן", "סכום קבוע בשקלים", 1000, 30, None)[0]
-    store.save_profile(uid, complete_profile())
-    assert "בחר רמת סיכון" in appmod.make_confirm_handler(store, uid)(None, "סכום קבוע בשקלים", 1000, 30, None)[0]
-    assert "הזן סכום" in appmod.make_confirm_handler(store, uid)("מאוזן", "סכום קבוע בשקלים", None, 30, None)[0]
-
-
-def test_model_failure_still_leads_to_a_usable_plan():
-    store, uid = new_store()
-    store.save_profile(uid, complete_profile())
-    out = appmod.make_analysis_handler(store, uid, llm("לא JSON"), "m")()
-    assert "ניתוח בסיסי" in out[0] and out[3] == 10000
-
-
-def old_form_answers():
-    return IntakeAnswers(age=99, status="שכיר/ה", monthly_net_income=20000, monthly_expenses=8000,
-                         can_save_monthly=3000, liquid_savings=50000, horizon_label="עד 3 שנים",
-                         restrictions_text="ישן", pension_value=5000, study_fund_value=7000, other_assets=9000).model_dump()
-
-
-def test_answers_come_only_from_profile():
-    store, uid = new_store()
-    store.save_state(uid, "intake", old_form_answers())
-    store.save_profile(uid, complete_profile(investment_goal="דירה", restrictions=["לא למכור: ZIM"]))
-    a = appmod.load_answers(store, uid)
-    assert (a.age, a.can_save_monthly, a.horizon_label, a.goals) == (35, 10000, "7 עד 15 שנים", ["דירה"])
-    assert a.restrictions_text == "לא למכור: ZIM"
-    # המספרים לניתוח באים מתמונת המצב של שלב 2, לא מכאן ולא מהטופס הישן
-    assert a.monthly_net_income is None and a.liquid_savings is None
-    assert a.monthly_expenses is None and a.status is None and a.pension_value is None
-
-
-def recording_llm(content, calls):
-    def create(**kw):
-        calls.append(kw)
-        if content is None:
-            raise RuntimeError("down")
-        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
-    return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
-
-
-def test_analysis_uses_the_same_situation_as_stage2():
-    from portfolio_copilot.situation import analysis_input, load_situation, situation_values
-    store, uid = new_store()
-    store.save_profile(uid, complete_profile())
-    # נתונים ישנים שעוד שמורים במסד (אחזקות, דוח קרן, הזנה ידנית): לא מוצגים בשלב 2 ולא נכנסים לניתוח
-    store.upsert_holding(uid, "VT", 100)
-    store.save_document(uid, {"doc_type": "fund_report", "period": "2026-Q1", "data": {}, "warnings": [],
-                              "summary": {"fund_type": "pension", "fund_name": "קרן", "provider": "חברה", "balance_end": 250000.0}})
-    store.save_state(uid, "assets", {"monthly_net_income": 18000, "liquid_savings": 1, "pension_value": 1,
-                                     "study_fund_value": 1, "other_assets": 1})
-    calls = []
-    appmod.make_analysis_handler(store, uid, recording_llm(json.dumps(GUIDANCE, ensure_ascii=False), calls), "m")()
-    sent = json.loads(calls[0]["messages"][1]["content"])
-    situation = load_situation(store, uid)
-    shown = situation_values(situation)
-    assert sent["picture"] == analysis_input(situation)
-    values = {i["label"]: (i["value"], i["source"]) for i in sent["picture"]["items"]}
-    assert values["קרן פנסיה"] == (200000, "ראיון") and "תיק השקעות" not in values
-    assert values["כסף נזיל וחסכונות בבנק"] == (60000, "ראיון")
-    a = sent["answers"]
-    assert (a["monthly_net_income"], a["monthly_expenses"], a["can_save_monthly"], a["liquid_savings"]) == (
-        shown["monthly_net_income"], shown["monthly_expenses"], shown["monthly_deposit"], shown["liquid_savings"]) == (
-        40000, 15000, 10000, 60000)
-    assert a["pension_value"] == 200000 and a["other_assets"] == 0  # לא מהדוח ולא ה-1 מההזנה הידנית
-    assert sent["picture"]["total"] == situation["total"] == 60000 + 200000 + 40000 + 0
-    assert sent["picture"]["emergency_months"] == 4.0
-
-
-def test_unknown_field_stays_unknown_in_analysis():
-    store, uid = new_store()
-    store.save_profile(uid, complete_profile(monthly_deposit=None, liquid_savings=None,
-                                             unknown_fields=["monthly_deposit", "liquid_savings"]))
-    calls = []
-    out = appmod.make_analysis_handler(store, uid, recording_llm(None, calls), "m")()
-    sent = json.loads(calls[0]["messages"][1]["content"])
-    assert sent["answers"]["can_save_monthly"] is None and sent["answers"]["liquid_savings"] is None
-    assert sent["picture"]["can_save_monthly"] is None and sent["picture"]["emergency_months"] is None
-    assert sent["picture"]["savings_rate"] is None
-    html = out[0]
-    assert "ניתוח בסיסי" in html and "מה חסר" in html
-    assert "כמה אפשר להפריש בחודש: אמרת שאתה לא יודע" in html and "כסף נזיל וחסכונות בבנק: אמרת שאתה לא יודע" in html
-    assert "להשלים כמה אפשר להפריש בחודש" in html and "תוכנית חודשית מוצעת" not in html
-    assert store.load_plan(uid).savings_value is None  # לא נשמרה תוכנית מ-0 מנוחש
-
-
-def test_horizon_labels_match_known_options():
-    for years, expected in ((1, "עד 3 שנים"), (3, "עד 3 שנים"), (5, "3 עד 7 שנים"), (15, "7 עד 15 שנים"), (30, "יותר מ-15 שנים")):
-        assert appmod.horizon_label(years) == expected and expected in HORIZON_OPTIONS
-    assert appmod.horizon_label(None) is None
 
 
 def test_intake_progress_card():
@@ -306,3 +190,60 @@ def test_demo_builds_with_chat_intake():
     demo, _ = appmod.build_demo(store, uid)
     labels = {getattr(b, "label", None) for b in demo.blocks.values()}
     assert "שיחת היכרות" in labels and "גיל" not in labels  # טופס השאלון כבר לא בשלב 1
+
+
+# ---------- דיווח חודשי ----------
+def test_monthly_report_uses_profile_and_records_history():
+    store, uid = new_store()
+    store.save_profile(uid, complete_profile(liquid_savings=100000))  # קרן חירום מלאה (יעד 90,000)
+    html = appmod.make_monthly_handler(store, uid)(40000, 4000, 2500, "אחוז מהנטו", 25)
+    assert "מה לעשות עם ₪10,000" in html and "25% מנטו של ₪40,000" in html
+    assert "מדד מניות ארה&quot;ב" in html and "₪2,750" in html and "קרן חירום (" not in html
+    assert "מכירה" in html and "קנה" not in html  # "אין הצעות מכירה", בלי פעולות קנייה של נכס ספציפי
+    event = store.list_salary_events(uid)[0]
+    assert (event["net"], event["set_aside"], event["period"]) == (40000, 10000, event["allocation"]["as_of"][:7])
+
+
+def test_monthly_report_errors_are_shown_and_nothing_is_saved():
+    store, uid = new_store()
+    store.save_profile(uid, complete_profile())
+    handler = appmod.make_monthly_handler(store, uid)
+    assert "הזן כמה נכנס נטו" in handler(None, None, None, "סכום בשקלים", 1000)
+    assert "הזן כמה להשקיע" in handler(10000, None, None, "סכום בשקלים", None)
+    assert "גבוה מהנטו" in handler(10000, None, None, "סכום בשקלים", 20000)
+    assert store.list_salary_events(uid) == []
+
+
+def test_monthly_report_with_partial_profile_lists_what_is_missing():
+    store, uid = new_store()
+    store.save_profile(uid, InvestorProfile(monthly_expenses=10000, liquid_savings=0))
+    html = appmod.make_monthly_handler(store, uid)(20000, 0, 0, "סכום בשקלים", 5000)
+    assert "קרן חירום" in html and "מה חסר בפרופיל" in html and "אופק השקעה" in html
+
+
+def test_payslip_upload_fills_fields(monkeypatch):
+    store, uid = new_store()
+    doc = {"doc_type": "payslip", "period": "2026-10", "data": {}, "warnings": [],
+           "summary": {"net_to_bank": 17200.0, "pension_monthly_total": 2100.0, "study_fund_monthly_total": 900.0}}
+    monkeypatch.setattr(appmod, "read_document", lambda path, client, model: doc)
+    net, pension, study, status = appmod.make_payslip_handler(store, uid)("slip.pdf")
+    assert (net, pension, study) == (17200.0, 2100.0, 900.0) and "התלוש נקרא" in status
+    assert len(store.list_documents(uid, "payslip")) == 1
+
+    def not_a_payslip(path, client, model):
+        raise ValueError("כרגע אפשר לקרוא רק תלושי שכר.")
+
+    monkeypatch.setattr(appmod, "read_document", not_a_payslip)
+    *_, status = appmod.make_payslip_handler(store, uid)("report.pdf")
+    assert "רק תלושי שכר" in status and len(store.list_documents(uid, "payslip")) == 1
+
+
+def test_three_stages_and_no_analysis_tab():
+    from portfolio_copilot.ui import STAGES, stages_html
+    assert [k for k, _ in STAGES] == ["intake", "picture", "monthly"]
+    assert "ניתוח והדרכה" not in stages_html({})
+    store, uid = new_store()
+    demo, _ = appmod.build_demo(store, uid)
+    texts = {str(getattr(b, attr, "")) for b in demo.blocks.values() for attr in ("label", "value")}
+    assert "המשך לניהול חודשי" in texts and "3. ניהול חודשי" in texts
+    assert not any("ניתוח והדרכה" in t or "נתח את המצב" in t for t in texts)

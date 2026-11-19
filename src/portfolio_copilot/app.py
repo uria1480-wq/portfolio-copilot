@@ -4,20 +4,15 @@ import inspect
 import gradio as gr
 
 from portfolio_copilot.agent import chat_step, client, MODEL_NAME
-from portfolio_copilot.agent_tools import _prices_for
-from portfolio_copilot.analysis import LEVELS, analyze
 from portfolio_copilot.db import Store
-from portfolio_copilot.intake import IntakeAnswers
-from portfolio_copilot.plan import Bucket, SavingsPlan
-from portfolio_copilot.proposal import build_proposal
+from portfolio_copilot.documents import read_document
+from portfolio_copilot.proposal import build_proposal, monthly_report
 from portfolio_copilot.rag import KnowledgeBase, load_folder
-from portfolio_copilot.salary import plan_salary
 from portfolio_copilot.schemas import InvestorProfile
-from portfolio_copilot.situation import analysis_answer_values, analysis_input, load_situation
-from portfolio_copilot.ui import (CSS, PROFILE_FIELD_LABELS, banner_html, guidance_html, hero_html,
-                                  intake_progress_html, knowledge_html, plan_html, proposal_html,
-                                  profile_html, salary_history_html, salary_result_html, situation_html, stages_html,
-                                  supported)
+from portfolio_copilot.situation import load_situation
+from portfolio_copilot.ui import (CSS, banner_html, hero_html, intake_progress_html, knowledge_html,
+                                  monthly_report_html, profile_html, proposal_html, salary_history_html,
+                                  situation_html, stages_html, supported)
 
 USER_NAME = "demo"  # בהמשך אפשר להחליף בהתחברות אמיתית; כל הקוד כבר עובד לפי user_id
 NOCHANGE = getattr(gr, "skip", gr.update)
@@ -33,48 +28,13 @@ INTAKE_DONE_GREETING = "הפרופיל שלך כבר מלא. אפשר לעדכן
 
 
 # ---------- מצב ושלבים ----------
-def horizon_label(years: int | None) -> str | None:
-    """ממיר אופק בשנים מהפרופיל לתווית שהניתוח והתמונה מכירים."""
-    if years is None:
-        return None
-    if years <= 3:
-        return "עד 3 שנים"
-    if years <= 7:
-        return "3 עד 7 שנים"
-    if years <= 15:
-        return "7 עד 15 שנים"
-    return "יותר מ-15 שנים"
-
-
-def load_answers(store: Store, user_id: int) -> IntakeAnswers:
-    """התשובות ששלבים 2 ו-3 צריכים: רק מהפרופיל שנבנה בשיחה (שלב 1).
-    תשובות הטופס הישן ("intake") וההזנה הידנית הישנה ("assets") לא נקראות. מה שאין לו מקור נשאר ריק."""
-    profile = store.load_profile(user_id)
-    update = {}
-    if profile.age is not None:
-        update["age"] = profile.age
-    if profile.monthly_deposit is not None:
-        update["can_save_monthly"] = profile.monthly_deposit
-    if profile.investment_horizon_years is not None:
-        update["horizon_label"] = horizon_label(profile.investment_horizon_years)
-    if profile.investment_goal:
-        update["goals"] = [profile.investment_goal]
-    if profile.restrictions:
-        update["restrictions_text"] = "\n".join(profile.restrictions)
-    return IntakeAnswers(**update)
-
-
-def missing_profile_labels(profile: InvestorProfile) -> list[str]:
-    return [PROFILE_FIELD_LABELS.get(f, f) for f in profile.missing_fields()]
-
-
 def stage_flags(store: Store, user_id: int) -> dict:
+    """היכרות ו"המצב שלי" בוצעו כשהפרופיל מלא, ואז נפתח הניהול החודשי. הוא בוצע אחרי דיווח חודשי ראשון."""
     profile_complete = not store.load_profile(user_id).missing_fields()
     return {
         "intake": profile_complete,
         "picture": profile_complete,
-        "analysis": store.load_state(user_id, "guidance") is not None,
-        "monthly": store.load_plan(user_id).is_ready() and store.load_profile(user_id).is_complete(),
+        "monthly": profile_complete and bool(store.list_salary_events(user_id)),
     }
 
 
@@ -136,92 +96,39 @@ def make_proposal_handler(store: Store, user_id: int):
     return show
 
 
-# ---------- שלב 3: ניתוח והדרכה ----------
-def make_analysis_handler(store: Store, user_id: int, llm_client, model: str):
-    def run():
-        profile = store.load_profile(user_id)
-        missing = missing_profile_labels(profile)
-        if missing:
-            return (banner_html("❌ השלם קודם את שיחת ההיכרות. חסר: " + ", ".join(missing)),
-                    NOCHANGE(), NOCHANGE(), NOCHANGE(), NOCHANGE(), NOCHANGE(), NOCHANGE(), NOCHANGE())
-        # אותו מצב שמוצג בשלב 2. המספרים באים ממנו, ומ-load_answers רק גיל, יעדים, אופק והגבלות
-        situation = load_situation(store, user_id)
-        answers = load_answers(store, user_id).model_copy(update=analysis_answer_values(situation))
-        level = profile.recommended_risk_level  # רמת הסיכון שהמשתמש אישר בשיחה
-        reasons = [profile.agent_reasoning] if profile.agent_reasoning else [f"רמת סיכון שאישרת בשיחה: {level}"]
-        guidance = analyze(answers, analysis_input(situation), level, reasons, llm_client, model)
-        store.save_state(user_id, "guidance", guidance.model_dump(mode="json"))
-        plan = guidance.plan
-        if plan:
-            store.save_plan(user_id, plan)  # טיוטה, עדיין לא מאושרת
-        risk = guidance.risk_level or level
-        if plan:
-            percent = plan.savings_mode == "percent"
-            editor = ("אחוז מהנטו" if percent else "סכום קבוע בשקלים",
-                      plan.savings_value * 100 if percent else plan.savings_value,
-                      round(sum(b.share for b in plan.buckets if b.kind == "cash") * 100),
-                      plan.monthly_net_income)
-        else:
-            editor = (NOCHANGE(), NOCHANGE(), NOCHANGE(), NOCHANGE())
-        return (guidance_html(guidance), risk, *editor, plan_html(store.load_plan(user_id)),
-                stages_html(stage_flags(store, user_id)))
-
-    return run
+# ---------- ניהול חודשי ----------
+AMOUNT_MODES = {"סכום בשקלים": "fixed", "אחוז מהנטו": "percent"}
 
 
-def make_confirm_handler(store: Store, user_id: int):
-    def confirm(risk, mode_label, value, cash_pct, income):
-        def fail(message):
-            return (banner_html("❌ " + message), NOCHANGE(), NOCHANGE(), NOCHANGE(), NOCHANGE(), NOCHANGE(), NOCHANGE())
-
-        if store.load_profile(user_id).missing_fields():
-            return fail("השלם קודם את שיחת ההיכרות")
-        if risk not in LEVELS:
-            return fail("בחר רמת סיכון")
-        if not value or value <= 0:
-            return fail("הזן סכום או אחוז הפרשה")
+def make_monthly_handler(store: Store, user_id: int):
+    """דיווח חודשי: הפרופיל השמור + מה שהוזן -> monthly_report (קוד בלבד) -> HTML, ונשמר בהיסטוריה."""
+    def run(net, pension, study, mode_label, value):
         try:
-            cash = min(max((cash_pct or 0) / 100, 0), 1)
-            guidance = store.load_state(user_id, "guidance") or {}
-            rationale = ((guidance.get("plan") or {}).get("rationale")) or None
-            plan = SavingsPlan(
-                monthly_net_income=income or None,
-                savings_mode="percent" if str(mode_label).startswith("אחוז") else "fixed",
-                savings_value=float(value),
-                buckets=[Bucket(name="כסף נזיל / קרן חירום", kind="cash", share=cash),
-                         Bucket(name="השקעות", kind="invest", share=1 - cash)],
-                rationale=rationale, confirmed=True)
-        except ValueError as e:
-            return fail(str(e))
-        # הפרופיל מהשיחה נשמר כמו שהוא (כולל מגבלות), ורק רמת הסיכון מתעדכנת לבחירה כאן
-        profile = store.load_profile(user_id).model_copy(update={"recommended_risk_level": risk, "risk_confirmed": True})
-        store.save_profile(user_id, profile)
-        store.save_plan(user_id, plan)
-        return (banner_html("✅ התוכנית אושרה. עוברים לניהול החודשי."), plan_html(plan),
-                stages_html(stage_flags(store, user_id)), gr.Tabs(selected="monthly"), profile, profile_html(profile),
-                intake_panel_html(profile))
-
-    return confirm
-
-
-# ---------- שלב 4: ניהול חודשי ----------
-def make_salary_handler(store: Store, user_id: int, fetch=None):
-    def run(net, pension, study):
-        try:
-            if not net or net <= 0:
-                raise ValueError("הזן כמה נכנס נטו לחשבון הבנק")
-            holdings = store.list_holdings(user_id)
-            prices, errors = _prices_for([h["symbol"] for h in holdings], fetch)
-            if errors:
-                raise ValueError(f"לא נמצאו מחירים עבור: {', '.join(errors)}")
-            result = plan_salary(store.load_profile(user_id), store.load_plan(user_id), holdings, prices,
-                                 float(net), float(pension or 0), float(study or 0))
-            store.add_salary_event(user_id, result)
+            report = monthly_report(store.load_profile(user_id), net, pension, study,
+                                    AMOUNT_MODES.get(mode_label, ""), value)
         except ValueError as e:
             return salary_history_html(store.list_salary_events(user_id), prefix=f"❌ {e}")
-        return salary_result_html(result) + salary_history_html(store.list_salary_events(user_id))
+        store.add_salary_event(user_id, report.model_dump(mode="json"))
+        return monthly_report_html(report) + salary_history_html(store.list_salary_events(user_id))
 
     return run
+
+
+def make_payslip_handler(store: Store, user_id: int):
+    """העלאת תלוש (אופציונלי): נקרא בקוד הקיים, נשמר, וממלא את שלושת השדות. אפשר לתקן לפני החישוב."""
+    def upload(file):
+        if not file:
+            return NOCHANGE(), NOCHANGE(), NOCHANGE(), ""
+        try:
+            doc = read_document(getattr(file, "name", file), client, MODEL_NAME)
+        except Exception as e:
+            return NOCHANGE(), NOCHANGE(), NOCHANGE(), banner_html(f"❌ {e}")
+        store.save_document(user_id, doc)
+        s = doc["summary"]
+        return (s.get("net_to_bank"), s.get("pension_monthly_total"), s.get("study_fund_monthly_total"),
+                banner_html("✅ התלוש נקרא והשדות מולאו. בדוק אותם לפני החישוב."))
+
+    return upload
 
 
 # ---------- צ'אט: כלי צדדי ----------
@@ -251,7 +158,6 @@ def build_demo(store: Store, user_id: int, kb=None, kb_error=None):
         blocks_kwargs, launch_kwargs = dict(style), {}
 
     initial_profile = store.load_profile(user_id)
-    guidance_saved = store.load_state(user_id, "guidance")
 
     with gr.Blocks(title="Portfolio Copilot", **supported(gr.Blocks, **blocks_kwargs)) as demo:
         gr.HTML(f"<style>{CSS}</style>" + hero_html())
@@ -283,34 +189,24 @@ def build_demo(store: Store, user_id: int, kb=None, kb_error=None):
                 picture_display = gr.HTML(situation_html(load_situation(store, user_id)))
                 with gr.Row():
                     refresh_btn = gr.Button("רענן תמונת מצב", variant="secondary")
-                    to_analysis_btn = gr.Button("המשך לניתוח והדרכה", variant="primary")
+                    to_monthly_btn = gr.Button("המשך לניהול חודשי", variant="primary")
                 proposal_btn = gr.Button("קבל הצעה", variant="primary")
                 proposal_display = gr.HTML("")
 
-            # --- 3. ניתוח והדרכה ---
-            with gr.Tab("3. ניתוח והדרכה", id="analysis"):
-                analyze_btn = gr.Button("נתח את המצב שלי", variant="primary")
-                guidance_display = gr.HTML("")
-                gr.HTML('<div class="pc-section">אישור התוכנית (אפשר לשנות לפני האישור)</div>')
-                risk_in = gr.Radio(list(LEVELS), label="רמת סיכון", value=initial_profile.recommended_risk_level)
+            # --- 3. ניהול חודשי ---
+            with gr.Tab("3. ניהול חודשי", id="monthly"):
+                gr.HTML('<div class="pc-card"><div class="pc-card-head"><h3>דיווח חודשי</h3></div><div class="pc-empty">'
+                        'הזן את נתוני החודש, או העלה תלוש שימלא אותם. רמת הסיכון והתמהיל נלקחים מהפרופיל.</div></div>')
+                payslip_in = gr.File(label="תלוש שכר PDF (לא חובה)", file_types=[".pdf"])
+                payslip_status = gr.HTML("")
                 with gr.Row():
-                    mode_in = gr.Radio(["סכום קבוע בשקלים", "אחוז מהנטו"], value="סכום קבוע בשקלים", label="איך מחשבים כמה להפריש")
-                    value_in = gr.Number(label="סכום בשקלים, או אחוז (למשל 25)")
+                    net_in = gr.Number(label="נטו החודש (₪)")
+                    pension_m_in = gr.Number(label="הפקדה לפנסיה (₪)")
+                    study_m_in = gr.Number(label="הפקדה להשתלמות (₪)")
                 with gr.Row():
-                    cash_in = gr.Slider(0, 100, value=30, step=5, label="כמה אחוזים מההפרשה נשארים כסף נזיל או קרן חירום")
-                    plan_income_in = gr.Number(label="הכנסה נטו חודשית אופיינית (לא חובה)")
-                confirm_btn = gr.Button("אשר והתחל ניהול חודשי", variant="primary")
-                confirm_status = gr.HTML("")
-
-            # --- 4. ניהול חודשי ---
-            with gr.Tab("4. ניהול חודשי", id="monthly"):
-                plan_display = gr.HTML(plan_html(store.load_plan(user_id)))
-                gr.HTML('<div class="pc-section">נכנסה משכורת</div>')
-                with gr.Row():
-                    net_in = gr.Number(label="נטו שנכנס לבנק (₪)")
-                    pension_m_in = gr.Number(label="הופרש לפנסיה (₪)")
-                    study_m_in = gr.Number(label="הופרש להשתלמות (₪)")
-                salary_btn = gr.Button("נכנסה משכורת", variant="primary")
+                    amount_mode_in = gr.Radio(list(AMOUNT_MODES), value="סכום בשקלים", label="כמה להשקיע החודש")
+                    amount_in = gr.Number(label="סכום בשקלים, או אחוז מהנטו (למשל 25)")
+                salary_btn = gr.Button("חשב חלוקה", variant="primary")
                 salary_display = gr.HTML(salary_history_html(store.list_salary_events(user_id)))
 
             # --- שאל את הסוכן ---
@@ -341,14 +237,11 @@ def build_demo(store: Store, user_id: int, kb=None, kb_error=None):
             fn=refresh, inputs=None, outputs=[picture_display, stages_display])
         refresh_btn.click(fn=refresh, inputs=None, outputs=[picture_display, stages_display])
         proposal_btn.click(fn=make_proposal_handler(store, user_id), inputs=None, outputs=proposal_display)
-        to_analysis_btn.click(fn=lambda: gr.Tabs(selected="analysis"), inputs=None, outputs=tabs)
-        analyze_btn.click(fn=make_analysis_handler(store, user_id, client, MODEL_NAME), inputs=None,
-                          outputs=[guidance_display, risk_in, mode_in, value_in, cash_in, plan_income_in, plan_display, stages_display])
-        confirm_btn.click(fn=make_confirm_handler(store, user_id),
-                          inputs=[risk_in, mode_in, value_in, cash_in, plan_income_in],
-                          outputs=[confirm_status, plan_display, stages_display, tabs, profile_state, profile_display,
-                                   intake_panel])
-        salary_btn.click(fn=make_salary_handler(store, user_id), inputs=[net_in, pension_m_in, study_m_in], outputs=salary_display)
+        to_monthly_btn.click(fn=lambda: gr.Tabs(selected="monthly"), inputs=None, outputs=tabs)
+        salary_btn.click(fn=make_monthly_handler(store, user_id),
+                         inputs=[net_in, pension_m_in, study_m_in, amount_mode_in, amount_in], outputs=salary_display)
+        payslip_in.upload(fn=make_payslip_handler(store, user_id), inputs=payslip_in,
+                          outputs=[net_in, pension_m_in, study_m_in, payslip_status])
 
         chat = make_chat_handler(store, user_id, kb)
         chat_outputs = [msg_input, chatbot, profile_state, profile_display]

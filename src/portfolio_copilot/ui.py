@@ -2,9 +2,8 @@
 import html
 import inspect
 
-from portfolio_copilot.analysis import Guidance
 from portfolio_copilot.plan import SavingsPlan
-from portfolio_copilot.proposal import Proposal
+from portfolio_copilot.proposal import MONEY_MARKET, MonthlyReport, Proposal
 from portfolio_copilot.schemas import InvestorProfile
 
 
@@ -363,8 +362,8 @@ def salary_history_html(events: list[dict], prefix: str = "") -> str:
                    '<table class="pc-table"><tr><th>חודש</th><th>נטו</th><th>הופרש</th></tr>' + rows + "</table></div>")
 
 
-# --- מסע המשתמש: שלבים, תמונת מצב והדרכה ---
-STAGES = [("intake", "היכרות"), ("picture", "המצב שלי"), ("analysis", "ניתוח והדרכה"), ("monthly", "ניהול חודשי")]
+# --- מסע המשתמש: שלבים ותמונת מצב ---
+STAGES = [("intake", "היכרות"), ("picture", "המצב שלי"), ("monthly", "ניהול חודשי")]
 
 
 def stages_html(done: dict) -> str:
@@ -449,32 +448,6 @@ def situation_html(view: dict, prefix: str = "") -> str:
                    '<span class="pc-chip pc-chip-idle">שווי נכסים ידוע</span></div>' + total + body + gaps + "</div>")
 
 
-def guidance_html(g: Guidance, prefix: str = "") -> str:
-    head = banner_html(prefix)
-    note = ('<div class="pc-banner pc-banner-info">ניתוח בסיסי שנגזר מהתשובות בקוד. הניתוח של המודל לא היה זמין.</div>'
-            if g.source == "fallback" else "")
-    risk = ""
-    if g.risk_level:
-        cls = RISK_CLASS.get(g.risk_level, "pc-chip-idle")
-        risk = (f'<div class="pc-field"><span class="pc-label">רמת סיכון מוצעת</span>'
-                f'<span><span class="pc-chip {cls}">{esc(g.risk_level)}</span></span>'
-                + (f'<span class="pc-empty">{esc(g.risk_reasoning)}</span>' if g.risk_reasoning else "") + "</div>")
-    steps = "".join(f'<li><b>{esc(s.title)}</b><span>{esc(s.why)}</span></li>' for s in g.steps)
-    steps_html = f'<div class="pc-section">הדרכה: מה לעשות, לפי סדר</div><ul class="pc-steps-list">{steps}</ul>' if steps else ""
-    plan = ""
-    if g.plan and g.plan.savings_value:
-        rule = f"{_money(g.plan.savings_value)} בכל חודש" if g.plan.savings_mode == "fixed" else f"{g.plan.savings_value * 100:.0f}% מהנטו"
-        plan = ('<div class="pc-section">תוכנית חודשית מוצעת</div><div class="pc-grid">'
-                + _field("כמה מפרישים", _value(rule))
-                + _field("לאן", _chips([f"{b.name} {b.share * 100:.0f}%" for b in g.plan.buckets])) + "</div>"
-                + (f'<div class="pc-quote">{esc(g.plan.rationale)}</div>' if g.plan.rationale else ""))
-    missing = ""
-    if g.missing:
-        missing = ('<div class="pc-section">מה חסר (הניתוח לא מניח ערך במקומו)</div><ul>'
-                   + "".join(f"<li>{esc(m)}</li>" for m in g.missing) + "</ul>")
-    return head + (f'<div class="pc-card"><div class="pc-card-head"><h3>הניתוח שלי</h3></div>{note}'
-                   f'<div style="font-size:16px;line-height:1.7;margin-bottom:12px">{esc(g.summary)}</div>{risk}{steps_html}{plan}{missing}</div>')
-
 # --- קבל הצעה (proposal.build_proposal) ---
 def _amount(x) -> str:
     return _money(x) if x is not None else "—"
@@ -538,3 +511,29 @@ def proposal_html(p: Proposal) -> str:
     return (banner_html("הצעה בסוגי נכסים, מחושבת בקוד לפי הפרופיל שלך. ההחלטה שלך.") + missing
             + _card("1. ביטחון: קרן חירום וחובות", safety) + _card("2. ההון הקיים", capital)
             + _card("3. פנסיה והשתלמות", pension) + notes + reasons)
+
+
+# --- דיווח חודשי (proposal.monthly_report) ---
+def monthly_report_html(r: MonthlyReport) -> str:
+    """מה לעשות עם הסכום להשקעה החודש, ולמה. כל המספרים חושבו ב-proposal.py."""
+    a = r.allocation
+    rows = []
+    if a.emergency_amount:
+        rows.append(f'<tr><td>קרן חירום ({esc(MONEY_MARKET)})</td><td>{_money(a.emergency_amount)}</td></tr>')
+    rows += [f'<tr><td>{esc(line.asset_class)}</td><td>{_money(line.amount)}</td></tr>'
+             for line in (a.lines or []) if line.amount]
+    if a.unallocated:
+        rows.append(f'<tr><td>לא חולק (חסרים נתונים)</td><td>{_money(a.unallocated)}</td></tr>')
+    table = ('<table class="pc-table"><tr><th>לאן</th><th>סכום</th></tr>' + "".join(rows) + "</table>")
+    summary = (f'<div class="pc-grid" style="margin-top:12px">{_field("נשאר להוצאות", _value(_money(r.free_to_spend)))}'
+               f'{_field("הפקדות לפנסיה ולהשתלמות", _value(f"{_money(r.pension_contributions)} · {_money(r.study_fund_contributions)}"))}'
+               f'{_field("סך החיסכון החודש", _value(_money(r.total_saved_this_month)))}</div>')
+    missing = ""
+    if a.missing:
+        missing = ('<div class="pc-section">מה חסר בפרופיל</div>'
+                   + _bullets([PROFILE_FIELD_LABELS.get(m, m) for m in a.missing]))
+    why = '<div class="pc-section">למה</div>' + _bullets(a.reasons)
+    return (f'<div class="pc-card"><div class="pc-card-head"><h3>דיווח חודשי: {esc(r.period)}</h3>'
+            f'<span class="pc-chip pc-chip-idle">נטו {esc(_money(r.net))}</span></div>'
+            '<div class="pc-empty">הצעה לאישור, בסוגי נכסים. לא בוצע כלום, ואין הצעות מכירה.</div>'
+            f'<div class="pc-section">מה לעשות עם {esc(_money(r.set_aside))}</div>{table}{summary}{missing}{why}</div>')

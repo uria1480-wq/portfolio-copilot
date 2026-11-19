@@ -4,6 +4,7 @@ import inspect
 
 from portfolio_copilot.analysis import Guidance
 from portfolio_copilot.plan import SavingsPlan
+from portfolio_copilot.proposal import Proposal
 from portfolio_copilot.schemas import InvestorProfile
 
 
@@ -473,3 +474,67 @@ def guidance_html(g: Guidance, prefix: str = "") -> str:
                    + "".join(f"<li>{esc(m)}</li>" for m in g.missing) + "</ul>")
     return head + (f'<div class="pc-card"><div class="pc-card-head"><h3>הניתוח שלי</h3></div>{note}'
                    f'<div style="font-size:16px;line-height:1.7;margin-bottom:12px">{esc(g.summary)}</div>{risk}{steps_html}{plan}{missing}</div>')
+
+# --- קבל הצעה (proposal.build_proposal) ---
+def _amount(x) -> str:
+    return _money(x) if x is not None else "—"
+
+
+def _card(title: str, inner: str) -> str:
+    return f'<div class="pc-card" style="margin-top:12px"><div class="pc-card-head"><h3>{esc(title)}</h3></div>{inner}</div>'
+
+
+def _bullets(items) -> str:
+    return '<ul style="margin:0;padding-right:20px;line-height:1.8">' + "".join(f"<li>{esc(i)}</li>" for i in items) + "</ul>"
+
+
+NOT_COMPUTED = '<div class="pc-empty">לא חושב: חסרים נתונים (ראה "מה חסר").</div>'
+
+
+def proposal_html(p: Proposal) -> str:
+    """מציג את ההצעה בשלושה חלקים. כל המספרים והמשפטים כבר חושבו ב-proposal.py."""
+    # 1. ביטחון
+    s = p.safety
+    if s is None:
+        safety = NOT_COMPUTED
+    else:
+        fields = []
+        if s.emergency_target_months is not None:
+            fields += [_field("יעד קרן חירום", _value(f"{s.emergency_target_months} חודשים · {_amount(s.emergency_target_amount)}")),
+                       _field("מכוסה היום", _value(f"{s.current_months} חודשים" if s.current_months is not None else "—")),
+                       _field("חסר", _value(_amount(s.shortfall))),
+                       _field("זמן למילוי", _value(f"כ-{s.months_to_fill} חודשים" if s.months_to_fill else "—"))]
+        if s.debt_ratio is not None:
+            fields.append(_field("החזר חובות מהנטו", _value(f"{s.debt_ratio:.0%}")))
+        safety = f'<div class="pc-grid">{"".join(fields)}</div>'
+        safety += (_bullets(s.steps) if s.steps else '<div class="pc-empty">אין צעד ביטחון דחוף.</div>')
+
+    # 2. ההון הקיים
+    c = p.capital
+    if c is None:
+        capital = NOT_COMPUTED
+    else:
+        rows = "".join(f'<tr><td>{esc(line.asset_class)}</td><td>{line.percent:g}%</td>'
+                       f'<td>{_amount(line.existing_amount)}</td><td>{_amount(line.monthly_amount)}</td></tr>'
+                       for line in c.allocation)
+        capital = (f'<div class="pc-grid">{_field("מניות בתמהיל", _value(f"{c.equity_percent:g}%"))}'
+                   f'{_field("עודף נזיל להשקעה", _value(_amount(c.liquid_surplus)))}'
+                   f'{_field("הפקדה חודשית", _value(_amount(c.monthly_deposit)))}</div>'
+                   '<table class="pc-table" style="margin-top:12px"><tr><th>סוג נכס</th><th>אחוז</th>'
+                   '<th>מהעודף הנזיל</th><th>מההפקדה החודשית</th></tr>' + rows + "</table>")
+
+    # 3. פנסיה והשתלמות
+    pension = NOT_COMPUTED if p.pension is None else (
+        f'<div class="pc-grid">{_field("קרן פנסיה: מסלול", _value(p.pension.pension_track))}'
+        f'{_field("קרן השתלמות: מסלול", _value(p.pension.study_fund_track))}</div>'
+        '<div class="pc-empty">המלצה על מסלול השקעה, לא על קופה או חברה מסוימת.</div>')
+
+    missing = ""
+    if p.missing:
+        labels = [PROFILE_FIELD_LABELS.get(m, m) for m in p.missing]
+        missing = _card("מה חסר כדי להשלים את ההצעה", _bullets(labels))
+    notes = _card("הערות", _bullets(p.notes)) if p.notes else ""
+    reasons = _card("על מה ההצעה מבוססת", _bullets(p.reasons)) if p.reasons else ""
+    return (banner_html("הצעה בסוגי נכסים, מחושבת בקוד לפי הפרופיל שלך. ההחלטה שלך.") + missing
+            + _card("1. ביטחון: קרן חירום וחובות", safety) + _card("2. ההון הקיים", capital)
+            + _card("3. פנסיה והשתלמות", pension) + notes + reasons)

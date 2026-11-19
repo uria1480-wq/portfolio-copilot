@@ -1,4 +1,4 @@
-"""שלב 2 "המצב שלי": הנתונים מוצגים מהפרופיל (מקור "ראיון") וממסמכים (מקור "מסמך"). חסר מוצג כ-"—"."""
+"""שלב 2 "המצב שלי": הנתונים מוצגים מהפרופיל בלבד (מקור "ראיון"). חסר מוצג כ-"—"."""
 import os
 
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
@@ -24,27 +24,24 @@ def rows(view):
     return {r["key"]: r for s in view["sections"] for r in s["rows"]}
 
 
-def report(fund_type, balance, name="קופה"):
-    return {"summary": {"fund_type": fund_type, "balance_end": balance, "fund_name": name, "provider": "חברה"}}
-
-
 def test_partial_profile_shows_empty_fields_as_dash():
-    view = build_situation(InvestorProfile(age=30, monthly_net_income=9000), [], [])
+    view = build_situation(InvestorProfile(age=30, monthly_net_income=9000))
     r = rows(view)
     assert r["age"]["display"] == "30" and r["age"]["source"] == "ראיון"
     assert r["monthly_net_income"]["display"] == "₪9,000" and r["monthly_net_income"]["source"] == "ראיון"
     for key in ("marital_status", "employment_status", "monthly_expenses", "liquid_savings", "pension_balance",
-                "study_fund_balance", "other_assets", "investment_goal", "investment_horizon_years", "holdings"):
+                "study_fund_balance", "other_assets", "investment_goal", "investment_horizon_years"):
         assert r[key]["display"] == "—" and r[key]["source"] is None and r[key]["status"] == "missing"
-    assert "spouse_monthly_net_income" not in r and "gemel" not in r  # לא נדרש / אין מסמך
+    assert "spouse_monthly_net_income" not in r  # לא נדרש
+    assert "holdings" not in r and "gemel" not in r  # אין יותר שורות תיק וגמל
     assert view["total"] is None
     gaps = " ".join(view["gaps"])
-    assert "כסף נזיל" in gaps and "קרן פנסיה" in gaps and "לא נטען קובץ החזקות" in gaps
+    assert "כסף נזיל" in gaps and "קרן פנסיה" in gaps and "החזקות" not in gaps
     assert "הכנסה נטו" not in gaps  # נאספה בראיון
 
 
 def test_full_profile_shows_all_values_with_interview_source():
-    view = build_situation(FULL, [], [])
+    view = build_situation(FULL)
     r = rows(view)
     for key in PROFILE_KEYS:
         assert r[key]["source"] == "ראיון" and r[key]["status"] == "known", key
@@ -54,38 +51,20 @@ def test_full_profile_shows_all_values_with_interview_source():
     assert r["spouse_monthly_net_income"]["display"] == "₪11,000"
     assert r["investment_horizon_years"]["display"] == "12 שנים" and r["marital_status"]["display"] == "נשוי"
     assert view["total"] == 45000 + 210000 + 60000 + 15000
-    assert view["gaps"] == ["לא נטען קובץ החזקות"]  # כל שדות הראיון ידועים
+    assert view["gaps"] == []  # כל שדות הראיון ידועים
 
 
 def test_unknown_is_dash_not_zero_and_none_is_zero():
     p = InvestorProfile(unknown_fields=["pension_balance"], monthly_debt_payments=0.0, other_assets=0.0)
-    r = rows(build_situation(p, [], []))
+    r = rows(build_situation(p))
     assert r["pension_balance"]["display"] == "—" and r["pension_balance"]["value"] is None
     assert r["pension_balance"]["source"] == "ראיון" and r["pension_balance"]["status"] == "unknown"
     assert r["monthly_debt_payments"]["display"] == "₪0" and r["other_assets"]["display"] == "₪0"
 
 
-def test_document_values_win_and_are_marked_document():
-    view = build_situation(FULL, [report("pension", 250000), report("provident_investment", 30000)],
-                           [{"summary": {"net_to_bank": 17200}}], holdings_value=12000.0, has_holdings=True)
-    r = rows(view)
-    assert (r["pension_balance"]["value"], r["pension_balance"]["source"]) == (250000, "מסמך")
-    assert (r["monthly_net_income"]["display"], r["monthly_net_income"]["source"]) == ("₪17,200", "מסמך")
-    assert (r["gemel"]["display"], r["gemel"]["source"]) == ("₪30,000", "מסמך")
-    assert (r["holdings"]["display"], r["holdings"]["source"]) == ("₪12,000", "מסמך")
-    assert r["study_fund_balance"]["source"] == "ראיון"  # אין דוח השתלמות, נשאר מהראיון
-    assert view["total"] == 45000 + 12000 + 250000 + 60000 + 30000 + 15000
-
-
-def test_only_the_latest_report_per_fund_counts():
-    newest_first = [report("pension", 210000, "מגדל"), report("pension", 200000, "מגדל"),
-                    report("pension", 50000, "הראל")]
-    assert rows(build_situation(InvestorProfile(), newest_first, []))["pension_balance"]["value"] == 260000
-
-
 def test_spouse_income_row_only_when_partnered():
-    assert "spouse_monthly_net_income" not in rows(build_situation(InvestorProfile(marital_status="רווק"), [], []))
-    r = rows(build_situation(InvestorProfile(marital_status="ידוע בציבור"), [], []))
+    assert "spouse_monthly_net_income" not in rows(build_situation(InvestorProfile(marital_status="רווק")))
+    r = rows(build_situation(InvestorProfile(marital_status="ידוע בציבור")))
     assert r["spouse_monthly_net_income"]["display"] == "—"
 
 
@@ -102,23 +81,24 @@ def test_old_intake_and_old_manual_values_are_not_displayed():
         assert r[key]["display"] == "—" and r[key]["source"] is None
 
 
-def test_load_situation_prices_holdings_and_reports_price_errors():
+def test_stored_holdings_and_documents_are_ignored():
     store = Store(":memory:")
     uid = store.get_or_create_user("demo")
     store.upsert_holding(uid, "VT", 10)
-    assert rows(load_situation(store, uid, fetch=lambda s: 100.0))["holdings"]["display"] == "₪1,000"
-
-    def broken(symbol):
-        raise ValueError("no price")
-
-    view = load_situation(store, uid, fetch=broken)
-    assert rows(view)["holdings"]["display"] == "—"
-    assert "לא נמצאו מחירים לתיק ההשקעות" in view["gaps"] and "לא נמצא מחיר עבור VT" in view["gaps"]
+    store.save_document(uid, {"doc_type": "fund_report", "period": "2026-Q1", "data": {}, "warnings": [],
+                              "summary": {"fund_type": "pension", "fund_name": "קרן", "provider": "חברה",
+                                          "balance_end": 250000.0}})
+    store.save_document(uid, {"doc_type": "payslip", "period": "2026-10", "data": {}, "warnings": [],
+                              "summary": {"period": "2026-10", "net_to_bank": 17200.0}})
+    store.save_profile(uid, InvestorProfile(age=30, pension_balance=90000))
+    r = rows(load_situation(store, uid))
+    assert (r["pension_balance"]["value"], r["pension_balance"]["source"]) == (90000, "ראיון")
+    assert r["monthly_net_income"]["display"] == "—" and "holdings" not in r and "gemel" not in r
 
 
 def test_situation_html_renders_dash_sources_and_escapes():
     evil = "<script>x</script>"
-    html = situation_html(build_situation(InvestorProfile(investment_goal=evil, unknown_fields=["liquid_savings"]), [], []),
+    html = situation_html(build_situation(InvestorProfile(investment_goal=evil, unknown_fields=["liquid_savings"])),
                           prefix="✅ נשמר")
     assert evil not in html and "&lt;script&gt;" in html
     assert "—" in html and "ראיון" in html and "pc-banner-ok" in html

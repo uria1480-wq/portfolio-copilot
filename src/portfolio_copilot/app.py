@@ -9,12 +9,13 @@ from portfolio_copilot.analysis import LEVELS, analyze
 from portfolio_copilot.db import Store
 from portfolio_copilot.intake import IntakeAnswers
 from portfolio_copilot.plan import Bucket, SavingsPlan
+from portfolio_copilot.proposal import build_proposal
 from portfolio_copilot.rag import KnowledgeBase, load_folder
 from portfolio_copilot.salary import plan_salary
 from portfolio_copilot.schemas import InvestorProfile
 from portfolio_copilot.situation import analysis_answer_values, analysis_input, load_situation
 from portfolio_copilot.ui import (CSS, PROFILE_FIELD_LABELS, banner_html, guidance_html, hero_html,
-                                  intake_progress_html, knowledge_html, plan_html,
+                                  intake_progress_html, knowledge_html, plan_html, proposal_html,
                                   profile_html, salary_history_html, salary_result_html, situation_html, stages_html,
                                   supported)
 
@@ -120,15 +121,23 @@ def make_intake_chat_handler(store: Store, user_id: int, kb=None, fetch=None):
 
 
 # ---------- שלב 2: המצב שלי ----------
-def make_refresh_handler(store: Store, user_id: int, fetch=None):
+def make_refresh_handler(store: Store, user_id: int):
     def refresh():
-        return situation_html(load_situation(store, user_id, fetch)), stages_html(stage_flags(store, user_id))
+        return situation_html(load_situation(store, user_id)), stages_html(stage_flags(store, user_id))
 
     return refresh
 
 
+def make_proposal_handler(store: Store, user_id: int):
+    """קבל הצעה: הפרופיל השמור -> build_proposal (קוד בלבד) -> HTML."""
+    def show():
+        return proposal_html(build_proposal(store.load_profile(user_id)))
+
+    return show
+
+
 # ---------- שלב 3: ניתוח והדרכה ----------
-def make_analysis_handler(store: Store, user_id: int, llm_client, model: str, fetch=None):
+def make_analysis_handler(store: Store, user_id: int, llm_client, model: str):
     def run():
         profile = store.load_profile(user_id)
         missing = missing_profile_labels(profile)
@@ -136,7 +145,7 @@ def make_analysis_handler(store: Store, user_id: int, llm_client, model: str, fe
             return (banner_html("❌ השלם קודם את שיחת ההיכרות. חסר: " + ", ".join(missing)),
                     NOCHANGE(), NOCHANGE(), NOCHANGE(), NOCHANGE(), NOCHANGE(), NOCHANGE(), NOCHANGE())
         # אותו מצב שמוצג בשלב 2. המספרים באים ממנו, ומ-load_answers רק גיל, יעדים, אופק והגבלות
-        situation = load_situation(store, user_id, fetch)
+        situation = load_situation(store, user_id)
         answers = load_answers(store, user_id).model_copy(update=analysis_answer_values(situation))
         level = profile.recommended_risk_level  # רמת הסיכון שהמשתמש אישר בשיחה
         reasons = [profile.agent_reasoning] if profile.agent_reasoning else [f"רמת סיכון שאישרת בשיחה: {level}"]
@@ -196,17 +205,6 @@ def make_confirm_handler(store: Store, user_id: int):
 
 
 # ---------- שלב 4: ניהול חודשי ----------
-def make_prefill_handler(store: Store, user_id: int):
-    def prefill():
-        slips = store.list_documents(user_id, "payslip")
-        if not slips:
-            return None, None, None
-        s = slips[0]["summary"]
-        return s.get("net_to_bank"), s.get("pension_monthly_total"), s.get("study_fund_monthly_total")
-
-    return prefill
-
-
 def make_salary_handler(store: Store, user_id: int, fetch=None):
     def run(net, pension, study):
         try:
@@ -286,6 +284,8 @@ def build_demo(store: Store, user_id: int, kb=None, kb_error=None):
                 with gr.Row():
                     refresh_btn = gr.Button("רענן תמונת מצב", variant="secondary")
                     to_analysis_btn = gr.Button("המשך לניתוח והדרכה", variant="primary")
+                proposal_btn = gr.Button("קבל הצעה", variant="primary")
+                proposal_display = gr.HTML("")
 
             # --- 3. ניתוח והדרכה ---
             with gr.Tab("3. ניתוח והדרכה", id="analysis"):
@@ -310,9 +310,7 @@ def build_demo(store: Store, user_id: int, kb=None, kb_error=None):
                     net_in = gr.Number(label="נטו שנכנס לבנק (₪)")
                     pension_m_in = gr.Number(label="הופרש לפנסיה (₪)")
                     study_m_in = gr.Number(label="הופרש להשתלמות (₪)")
-                with gr.Row():
-                    fill_btn = gr.Button("מלא מהתלוש האחרון", size="sm", variant="secondary")
-                    salary_btn = gr.Button("נכנסה משכורת", variant="primary")
+                salary_btn = gr.Button("נכנסה משכורת", variant="primary")
                 salary_display = gr.HTML(salary_history_html(store.list_salary_events(user_id)))
 
             # --- שאל את הסוכן ---
@@ -342,6 +340,7 @@ def build_demo(store: Store, user_id: int, kb=None, kb_error=None):
         to_picture_btn.click(fn=lambda: gr.Tabs(selected="picture"), inputs=None, outputs=tabs).then(
             fn=refresh, inputs=None, outputs=[picture_display, stages_display])
         refresh_btn.click(fn=refresh, inputs=None, outputs=[picture_display, stages_display])
+        proposal_btn.click(fn=make_proposal_handler(store, user_id), inputs=None, outputs=proposal_display)
         to_analysis_btn.click(fn=lambda: gr.Tabs(selected="analysis"), inputs=None, outputs=tabs)
         analyze_btn.click(fn=make_analysis_handler(store, user_id, client, MODEL_NAME), inputs=None,
                           outputs=[guidance_display, risk_in, mode_in, value_in, cash_in, plan_income_in, plan_display, stages_display])
@@ -349,7 +348,6 @@ def build_demo(store: Store, user_id: int, kb=None, kb_error=None):
                           inputs=[risk_in, mode_in, value_in, cash_in, plan_income_in],
                           outputs=[confirm_status, plan_display, stages_display, tabs, profile_state, profile_display,
                                    intake_panel])
-        fill_btn.click(fn=make_prefill_handler(store, user_id), inputs=None, outputs=[net_in, pension_m_in, study_m_in])
         salary_btn.click(fn=make_salary_handler(store, user_id), inputs=[net_in, pension_m_in, study_m_in], outputs=salary_display)
 
         chat = make_chat_handler(store, user_id, kb)

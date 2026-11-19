@@ -105,7 +105,7 @@ def test_full_journey(monkeypatch):
     assert appmod.stage_flags(store, uid)["picture"]
 
     # 3. ניתוח ואישור
-    analysis = appmod.make_analysis_handler(store, uid, llm(json.dumps(GUIDANCE, ensure_ascii=False)), "m", FETCH)()
+    analysis = appmod.make_analysis_handler(store, uid, llm(json.dumps(GUIDANCE, ensure_ascii=False)), "m")()
     assert "מצב יציב" in analysis[0] and analysis[1] == "מאוזן" and analysis[3] == 10000
     assert appmod.stage_flags(store, uid)["analysis"] and not appmod.stage_flags(store, uid)["monthly"]
     confirm = appmod.make_confirm_handler(store, uid)("מאוזן", "סכום קבוע בשקלים", 10000, 30, 40000)
@@ -159,7 +159,7 @@ def test_opening_message_depends_on_profile():
 
 def test_analysis_before_interview_is_blocked_and_confirm_needs_a_risk_level():
     store, uid = new_store()
-    out = appmod.make_analysis_handler(store, uid, llm("{}"), "m", FETCH)()
+    out = appmod.make_analysis_handler(store, uid, llm("{}"), "m")()
     assert "השלם קודם את שיחת ההיכרות" in out[0] and "גיל" in out[0]
     assert "השלם קודם" in appmod.make_confirm_handler(store, uid)("מאוזן", "סכום קבוע בשקלים", 1000, 30, None)[0]
     store.save_profile(uid, complete_profile())
@@ -170,7 +170,7 @@ def test_analysis_before_interview_is_blocked_and_confirm_needs_a_risk_level():
 def test_model_failure_still_leads_to_a_usable_plan():
     store, uid = new_store()
     store.save_profile(uid, complete_profile())
-    out = appmod.make_analysis_handler(store, uid, llm("לא JSON"), "m", FETCH)()
+    out = appmod.make_analysis_handler(store, uid, llm("לא JSON"), "m")()
     assert "ניתוח בסיסי" in out[0] and out[3] == 10000
 
 
@@ -205,27 +205,28 @@ def test_analysis_uses_the_same_situation_as_stage2():
     from portfolio_copilot.situation import analysis_input, load_situation, situation_values
     store, uid = new_store()
     store.save_profile(uid, complete_profile())
+    # נתונים ישנים שעוד שמורים במסד (אחזקות, דוח קרן, הזנה ידנית): לא מוצגים בשלב 2 ולא נכנסים לניתוח
     store.upsert_holding(uid, "VT", 100)
     store.save_document(uid, {"doc_type": "fund_report", "period": "2026-Q1", "data": {}, "warnings": [],
                               "summary": {"fund_type": "pension", "fund_name": "קרן", "provider": "חברה", "balance_end": 250000.0}})
-    # הזנה ידנית ישנה שעוד שמורה במסד: לא מוצגת בשלב 2 ולא נכנסת לניתוח
     store.save_state(uid, "assets", {"monthly_net_income": 18000, "liquid_savings": 1, "pension_value": 1,
                                      "study_fund_value": 1, "other_assets": 1})
     calls = []
-    appmod.make_analysis_handler(store, uid, recording_llm(json.dumps(GUIDANCE, ensure_ascii=False), calls), "m", FETCH)()
+    appmod.make_analysis_handler(store, uid, recording_llm(json.dumps(GUIDANCE, ensure_ascii=False), calls), "m")()
     sent = json.loads(calls[0]["messages"][1]["content"])
-    situation = load_situation(store, uid, FETCH)
+    situation = load_situation(store, uid)
     shown = situation_values(situation)
     assert sent["picture"] == analysis_input(situation)
     values = {i["label"]: (i["value"], i["source"]) for i in sent["picture"]["items"]}
-    assert values["קרן פנסיה"] == (250000.0, "מסמך") and values["תיק השקעות"] == (10000.0, "מסמך")
+    assert values["קרן פנסיה"] == (200000, "ראיון") and "תיק השקעות" not in values
     assert values["כסף נזיל וחסכונות בבנק"] == (60000, "ראיון")
     a = sent["answers"]
     assert (a["monthly_net_income"], a["monthly_expenses"], a["can_save_monthly"], a["liquid_savings"]) == (
         shown["monthly_net_income"], shown["monthly_expenses"], shown["monthly_deposit"], shown["liquid_savings"]) == (
         40000, 15000, 10000, 60000)
-    assert a["pension_value"] == 250000.0 and a["other_assets"] == 0  # לא ה-1 מההזנה הידנית
-    assert sent["picture"]["total"] == situation["total"] and sent["picture"]["emergency_months"] == 4.0
+    assert a["pension_value"] == 200000 and a["other_assets"] == 0  # לא מהדוח ולא ה-1 מההזנה הידנית
+    assert sent["picture"]["total"] == situation["total"] == 60000 + 200000 + 40000 + 0
+    assert sent["picture"]["emergency_months"] == 4.0
 
 
 def test_unknown_field_stays_unknown_in_analysis():
@@ -233,7 +234,7 @@ def test_unknown_field_stays_unknown_in_analysis():
     store.save_profile(uid, complete_profile(monthly_deposit=None, liquid_savings=None,
                                              unknown_fields=["monthly_deposit", "liquid_savings"]))
     calls = []
-    out = appmod.make_analysis_handler(store, uid, recording_llm(None, calls), "m", FETCH)()
+    out = appmod.make_analysis_handler(store, uid, recording_llm(None, calls), "m")()
     sent = json.loads(calls[0]["messages"][1]["content"])
     assert sent["answers"]["can_save_monthly"] is None and sent["answers"]["liquid_savings"] is None
     assert sent["picture"]["can_save_monthly"] is None and sent["picture"]["emergency_months"] is None

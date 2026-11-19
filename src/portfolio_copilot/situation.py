@@ -4,8 +4,28 @@
 לא קורא את IntakeAnswers ולא את ההזנה הידנית הישנה.
 """
 from portfolio_copilot.agent_tools import _prices_for
-from portfolio_copilot.picture import FUND_TYPE_GROUPS, _fund_total, _latest_reports
 from portfolio_copilot.schemas import InvestorProfile
+
+FUND_TYPE_GROUPS = {
+    "pension": {"pension"},
+    "study_fund": {"study_fund"},
+    "gemel": {"provident", "provident_investment"},
+}
+
+
+def _latest_reports(reports: list[dict]) -> list[dict]:
+    """הדוח העדכני ביותר לכל קופה. הרשימה מגיעה מהחדש לישן."""
+    seen = {}
+    for d in reports:
+        s = d["summary"]
+        seen.setdefault((s.get("provider"), s.get("fund_name"), s.get("fund_type")), s)
+    return list(seen.values())
+
+
+def _fund_total(latest: list[dict], types: set) -> float | None:
+    values = [s["balance_end"] for s in latest if s.get("fund_type") in types and s.get("balance_end") is not None]
+    return round(sum(values), 2) if values else None
+
 
 SOURCE_INTERVIEW = "ראיון"
 SOURCE_DOCUMENT = "מסמך"

@@ -7,17 +7,14 @@ from portfolio_copilot.agent import chat_step, client, MODEL_NAME
 from portfolio_copilot.agent_tools import _prices_for
 from portfolio_copilot.analysis import LEVELS, analyze
 from portfolio_copilot.db import Store
-from portfolio_copilot.fund_reports import read_any_document
 from portfolio_copilot.intake import IntakeAnswers
-from portfolio_copilot.picture import build_picture
 from portfolio_copilot.plan import Bucket, SavingsPlan
 from portfolio_copilot.rag import KnowledgeBase, load_folder
 from portfolio_copilot.salary import plan_salary
 from portfolio_copilot.schemas import InvestorProfile
 from portfolio_copilot.situation import analysis_answer_values, analysis_input, load_situation
-from portfolio_copilot.tools import parse_holdings_csv
-from portfolio_copilot.ui import (CSS, PROFILE_FIELD_LABELS, banner_html, documents_html, guidance_html, hero_html,
-                                  holdings_html, intake_progress_html, knowledge_html, picture_html, plan_html,
+from portfolio_copilot.ui import (CSS, PROFILE_FIELD_LABELS, banner_html, guidance_html, hero_html,
+                                  intake_progress_html, knowledge_html, plan_html,
                                   profile_html, salary_history_html, salary_result_html, situation_html, stages_html,
                                   supported)
 
@@ -35,15 +32,6 @@ INTAKE_DONE_GREETING = "הפרופיל שלך כבר מלא. אפשר לעדכן
 
 
 # ---------- מצב ושלבים ----------
-# שדות שהמשתמש מזין ידנית בשלב 2. נשמרים במפתח "assets", בנפרד מתשובות הטופס הישן ("intake") שכבר לא נקראות.
-ASSET_FIELDS = ("monthly_net_income", "liquid_savings", "pension_value", "study_fund_value", "other_assets")
-
-
-def load_assets(store: Store, user_id: int) -> dict:
-    data = store.load_state(user_id, "assets") or {}
-    return {k: data.get(k) for k in ASSET_FIELDS}
-
-
 def horizon_label(years: int | None) -> str | None:
     """ממיר אופק בשנים מהפרופיל לתווית שהניתוח והתמונה מכירים."""
     if years is None:
@@ -58,10 +46,10 @@ def horizon_label(years: int | None) -> str | None:
 
 
 def load_answers(store: Store, user_id: int) -> IntakeAnswers:
-    """התשובות ששלבים 2 ו-3 צריכים: מהפרופיל שנבנה בשיחה (שלב 1) ומההזנה הידנית בשלב 2 בלבד.
-    תשובות הטופס הישן (מפתח "intake") לא נקראות. מה שאין לו מקור נשאר ריק ומופיע כחסר."""
+    """התשובות ששלבים 2 ו-3 צריכים: רק מהפרופיל שנבנה בשיחה (שלב 1).
+    תשובות הטופס הישן ("intake") וההזנה הידנית הישנה ("assets") לא נקראות. מה שאין לו מקור נשאר ריק."""
     profile = store.load_profile(user_id)
-    update = {k: v for k, v in load_assets(store, user_id).items() if v is not None}
+    update = {}
     if profile.age is not None:
         update["age"] = profile.age
     if profile.monthly_deposit is not None:
@@ -80,25 +68,13 @@ def missing_profile_labels(profile: InvestorProfile) -> list[str]:
 
 
 def stage_flags(store: Store, user_id: int) -> dict:
-    has_info = (bool(store.list_documents(user_id)) or bool(store.list_holdings(user_id))
-                or any(v is not None for v in load_assets(store, user_id).values()))
+    profile_complete = not store.load_profile(user_id).missing_fields()
     return {
-        "intake": not store.load_profile(user_id).missing_fields(),
-        "picture": has_info,
+        "intake": profile_complete,
+        "picture": profile_complete,
         "analysis": store.load_state(user_id, "guidance") is not None,
         "monthly": store.load_plan(user_id).is_ready() and store.load_profile(user_id).is_complete(),
     }
-
-
-def compute_picture(store: Store, user_id: int, fetch=None) -> dict:
-    holdings = store.list_holdings(user_id)
-    value, errors = None, []
-    if holdings:
-        prices, errors = _prices_for([h["symbol"] for h in holdings], fetch)
-        if not errors:
-            value = round(sum(h["quantity"] * prices[h["symbol"]] for h in holdings), 2)
-    return build_picture(load_answers(store, user_id), value, store.list_documents(user_id, "fund_report"),
-                         store.list_documents(user_id, "payslip"), errors)
 
 
 # ---------- שיחה עם הסוכן (משותף לשלב 1 ולטאב הצד) ----------
@@ -144,55 +120,6 @@ def make_intake_chat_handler(store: Store, user_id: int, kb=None, fetch=None):
 
 
 # ---------- שלב 2: המצב שלי ----------
-def make_upload_handler(store: Store, user_id: int):
-    def upload(file):
-        if not file:
-            return holdings_html(store.list_holdings(user_id))
-        path = getattr(file, "name", file)
-        try:
-            with open(path, encoding="utf-8-sig") as f:
-                rows = parse_holdings_csv(f.read())
-        except (ValueError, OSError, UnicodeDecodeError) as e:
-            return holdings_html(store.list_holdings(user_id), prefix=f"❌ {e}")
-        new_symbols = {r["symbol"] for r in rows}
-        for h in store.list_holdings(user_id):  # הקובץ מחליף את התיק הקיים
-            if h["symbol"] not in new_symbols:
-                store.delete_holding(user_id, h["symbol"])
-        for r in rows:
-            store.upsert_holding(user_id, r["symbol"], r["quantity"], r["avg_cost"])
-        return holdings_html(store.list_holdings(user_id), prefix=f"✅ נטענו {len(rows)} החזקות. הקובץ מחליף את התיק הקיים.")
-
-    return upload
-
-
-def make_document_handler(store: Store, user_id: int):
-    def upload(file):
-        if not file:
-            return documents_html(store.list_documents(user_id))
-        path = getattr(file, "name", file)
-        try:
-            doc = read_any_document(path, client, MODEL_NAME)
-        except Exception as e:
-            return documents_html(store.list_documents(user_id), prefix=f"❌ {e}")
-        store.save_document(user_id, doc)
-        return documents_html(store.list_documents(user_id), prefix="✅ המסמך נקרא. הקובץ עצמו לא נשמר, רק הנתונים.")
-
-    return upload
-
-
-def make_assets_handler(store: Store, user_id: int, fetch=None):
-    def save(income, liquid, pension, study, other):
-        values = dict(zip(ASSET_FIELDS, (income, liquid, pension, study, other)))
-        try:
-            IntakeAnswers(**values)  # אותה בדיקה כמו קודם: ערכים לא שליליים
-        except ValueError:
-            return situation_html(load_situation(store, user_id, fetch), prefix="❌ הערכים צריכים להיות חיוביים"), NOCHANGE()
-        store.save_state(user_id, "assets", values)
-        return situation_html(load_situation(store, user_id, fetch), prefix="✅ הערכים נשמרו"), stages_html(stage_flags(store, user_id))
-
-    return save
-
-
 def make_refresh_handler(store: Store, user_id: int, fetch=None):
     def refresh():
         return situation_html(load_situation(store, user_id, fetch)), stages_html(stage_flags(store, user_id))
@@ -325,7 +252,6 @@ def build_demo(store: Store, user_id: int, kb=None, kb_error=None):
     else:
         blocks_kwargs, launch_kwargs = dict(style), {}
 
-    a = load_assets(store, user_id)
     initial_profile = store.load_profile(user_id)
     guidance_saved = store.load_state(user_id, "guidance")
 
@@ -355,24 +281,7 @@ def build_demo(store: Store, user_id: int, kb=None, kb_error=None):
             # --- 2. המצב שלי ---
             with gr.Tab("2. המצב שלי", id="picture"):
                 gr.HTML('<div class="pc-card"><div class="pc-card-head"><h3>כל המידע במקום אחד</h3></div><div class="pc-empty">'
-                        'צרף תלוש שכר, דוחות רבעוניים מקופות (פנסיה, השתלמות, גמל) וקובץ החזקות, או הזן שווי ידנית. '
-                        'הקבצים עצמם לא נשמרים, רק המספרים.</div></div>')
-                with gr.Row():
-                    with gr.Column():
-                        doc_input = gr.File(label="מסמך PDF: תלוש שכר או דוח רבעוני מקופה", file_types=[".pdf"])
-                        docs_display = gr.HTML(documents_html(store.list_documents(user_id)))
-                    with gr.Column():
-                        file_input = gr.File(label="החזקות (CSV: symbol, quantity, avg_cost)", file_types=[".csv"])
-                        holdings_display = gr.HTML(holdings_html(store.list_holdings(user_id)))
-                with gr.Accordion("הזנה ידנית: הכנסה, כסף נזיל ושווי קופות, אם אין מסמך", open=False):
-                    with gr.Row():
-                        income_in = gr.Number(label="הכנסה נטו חודשית (₪)", value=a["monthly_net_income"])
-                        liquid_in = gr.Number(label="כסף נזיל וחסכונות בבנק (₪)", value=a["liquid_savings"])
-                    with gr.Row():
-                        pension_in = gr.Number(label="שווי קרן פנסיה (₪)", value=a["pension_value"])
-                        study_in = gr.Number(label="שווי קרן השתלמות (₪)", value=a["study_fund_value"])
-                        other_in = gr.Number(label="נכסים אחרים (₪)", value=a["other_assets"])
-                    assets_btn = gr.Button("שמור ערכים")
+                        'הנתונים מגיעים משיחת ההיכרות.</div></div>')
                 picture_display = gr.HTML(situation_html(load_situation(store, user_id)))
                 with gr.Row():
                     refresh_btn = gr.Button("רענן תמונת מצב", variant="secondary")
@@ -432,13 +341,6 @@ def build_demo(store: Store, user_id: int, kb=None, kb_error=None):
         refresh = make_refresh_handler(store, user_id)
         to_picture_btn.click(fn=lambda: gr.Tabs(selected="picture"), inputs=None, outputs=tabs).then(
             fn=refresh, inputs=None, outputs=[picture_display, stages_display])
-        file_input.upload(fn=make_upload_handler(store, user_id), inputs=file_input, outputs=holdings_display).then(
-            fn=refresh, inputs=None, outputs=[picture_display, stages_display])
-        doc_input.upload(fn=make_document_handler(store, user_id), inputs=doc_input, outputs=docs_display).then(
-            fn=refresh, inputs=None, outputs=[picture_display, stages_display])
-        assets_btn.click(fn=make_assets_handler(store, user_id),
-                         inputs=[income_in, liquid_in, pension_in, study_in, other_in],
-                         outputs=[picture_display, stages_display])
         refresh_btn.click(fn=refresh, inputs=None, outputs=[picture_display, stages_display])
         to_analysis_btn.click(fn=lambda: gr.Tabs(selected="analysis"), inputs=None, outputs=tabs)
         analyze_btn.click(fn=make_analysis_handler(store, user_id, client, MODEL_NAME), inputs=None,

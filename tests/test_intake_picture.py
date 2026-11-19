@@ -1,6 +1,5 @@
 from portfolio_copilot.db import Store
 from portfolio_copilot.intake import IntakeAnswers, derive_profile, missing_fields, parse_restrictions, risk_assessment
-from portfolio_copilot.picture import build_picture
 
 
 def answers(**kw):
@@ -43,31 +42,6 @@ def test_derive_profile_maps_the_answers_and_leaves_risk_unconfirmed():
 
 def test_parse_restrictions():
     assert parse_restrictions("") == [] and parse_restrictions(" a ,, b;\nc ") == ["a", "b", "c"]
-
-
-def report(fund_type, balance, name="קופה", provider="חברה"):
-    return {"summary": {"fund_type": fund_type, "balance_end": balance, "fund_name": name, "provider": provider}}
-
-
-def test_picture_merges_interview_documents_holdings_and_manual_values():
-    pic = build_picture(answers(study_fund_value=30000), 25000.0,
-                        [report("pension", 200000, "מגדל"), report("provident_investment", 100000, "אנליסט")],
-                        [{"summary": {"net_to_bank": 39000}}])
-    values = {i["label"]: (i["value"], i["source"]) for i in pic["items"]}
-    assert values["קרן פנסיה"] == (200000, "דוח מהקופה")
-    assert values["קרן השתלמות"] == (30000, "הזנה ידנית")
-    assert values["קופת גמל"] == (100000, "דוח מהקופה")
-    assert values["תיק השקעות"] == (25000.0, "קובץ החזקות")
-    assert pic["total"] == 60000 + 25000 + 200000 + 30000 + 100000
-    assert pic["emergency_months"] == 4.0 and pic["savings_rate"] == 0.25 and pic["gaps"] == []
-
-
-def test_picture_uses_only_the_latest_report_per_fund_and_reports_gaps():
-    newest_first = [report("pension", 210000, "מגדל"), report("pension", 200000, "מגדל")]
-    pic = build_picture(answers(monthly_expenses=None), None, newest_first, [], price_errors=["XYZ"])
-    assert {i["label"]: i["value"] for i in pic["items"]}["קרן פנסיה"] == 210000
-    gaps = " ".join(pic["gaps"])
-    assert "השתלמות" in gaps and "תיק השקעות" in gaps and "XYZ" in gaps and "הוצאות" in gaps
 
 
 def test_state_storage_roundtrip():

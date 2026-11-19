@@ -427,28 +427,6 @@ def intake_result_html(level: str, reasons: list[str], prefix: str = "") -> str:
                    '<div class="pc-empty">זו הצעה. בשלב הניתוח תאשר או תשנה אותה.</div></div>')
 
 
-def picture_html(pic: dict, prefix: str = "") -> str:
-    head = banner_html(prefix)
-    rows = "".join(
-        f'<tr><td>{esc(i["label"])}</td><td>{_money(i["value"]) if i["value"] is not None else "—"}</td>'
-        f'<td>{_chips([i["source"]]) if i["source"] else ""}</td></tr>' for i in pic["items"])
-    total = f'<div class="pc-total">{_money(pic["total"])}</div>' if pic.get("total") is not None else '<div class="pc-empty">עדיין אין נתונים לסיכום.</div>'
-    income = pic.get("monthly_net_income")
-    metrics = [_field("הכנסה נטו חודשית", _value(_money(income)) if income is not None else _value("—", muted=True))]
-    if pic.get("savings_rate") is not None:
-        metrics.append(_field("שיעור הפרשה מהנטו", _value(f'{pic["savings_rate"] * 100:.0f}%')))
-    if pic.get("emergency_months") is not None:
-        metrics.append(_field("חודשי הוצאות מכוסים בכסף נזיל", _value(f'{pic["emergency_months"]:.1f}')))
-    grid = f'<div class="pc-grid" style="margin-top:12px">{"".join(metrics)}</div>' if metrics else ""
-    gaps = ""
-    if pic.get("gaps"):
-        gaps = ('<div class="pc-section">מה עוד חסר לתמונה מלאה</div><ul style="margin:0;padding-right:20px;line-height:1.8">'
-                + "".join(f"<li>{esc(g)}</li>" for g in pic["gaps"]) + "</ul>")
-    return head + ('<div class="pc-card"><div class="pc-card-head"><h3>תמונת המצב שלי</h3>'
-                   '<span class="pc-chip pc-chip-idle">שווי כולל ידוע</span></div>' + total +
-                   '<table class="pc-table"><tr><th>נכס</th><th>שווי</th><th>מקור</th></tr>' + rows + "</table>" + grid + gaps + "</div>")
-
-
 def situation_html(view: dict, prefix: str = "") -> str:
     """מציג את תמונת המצב של שלב 2 (situation.build_situation). הערכים והמקורות כבר מחושבים שם."""
     head = banner_html(prefix)

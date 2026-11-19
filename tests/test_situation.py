@@ -77,6 +77,12 @@ def test_document_values_win_and_are_marked_document():
     assert view["total"] == 45000 + 12000 + 250000 + 60000 + 30000 + 15000
 
 
+def test_only_the_latest_report_per_fund_counts():
+    newest_first = [report("pension", 210000, "מגדל"), report("pension", 200000, "מגדל"),
+                    report("pension", 50000, "הראל")]
+    assert rows(build_situation(InvestorProfile(), newest_first, []))["pension_balance"]["value"] == 260000
+
+
 def test_spouse_income_row_only_when_partnered():
     assert "spouse_monthly_net_income" not in rows(build_situation(InvestorProfile(marital_status="רווק"), [], []))
     r = rows(build_situation(InvestorProfile(marital_status="ידוע בציבור"), [], []))

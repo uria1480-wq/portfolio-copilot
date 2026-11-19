@@ -41,6 +41,12 @@ def test_cap_applies_to_single_assets_not_to_template_funds():
     assert not r["cap_breached"]
 
 
+def test_empty_holdings_give_buys_only_even_when_selling_is_allowed():
+    r = plan_trades(profile("מאוזן"), [], PRICES, deposit=10_000, allow_sell=True)
+    assert r["sells"] == [] and r["cash_from_sales"] == 0 and r["kept_symbols"] == []
+    assert sum(r["buys"].values()) == pytest.approx(10_000) and set(r["buys"]) <= {"VT", "BND", "BIL"}
+
+
 def test_cap_is_measured_on_total_including_new_deposit():
     holdings = [{"symbol": "ZIM", "quantity": 1000, "avg_cost": 20.0}]   # 20,000
     r = plan_trades(profile(cap=0.20), holdings, PRICES, deposit=80_000, allow_sell=True)  # total 100,000

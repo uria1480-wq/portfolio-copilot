@@ -98,15 +98,10 @@ def test_full_journey(monkeypatch):
     assert appmod.stage_flags(store, uid)["intake"] and "pc-step-done" in stages
     assert store.load_profile(uid) == profile
 
-    # 2. המצב שלי: ערכים ידניים, החזקות ומסמך נכנסים לתמונה אחת
-    appmod.make_assets_handler(store, uid, FETCH)(None, None, 150000, 40000, None)
+    # 2. המצב שלי: החזקות ומסמך נכנסים לתמונה אחת
     store.upsert_holding(uid, "VT", 100)
     store.save_document(uid, {"doc_type": "fund_report", "period": "2026-Q1", "data": {}, "warnings": [],
                               "summary": {"fund_type": "pension", "fund_name": "קרן", "provider": "חברה", "balance_end": 200000.0}})
-    pic = appmod.compute_picture(store, uid, FETCH)
-    values = {i["label"]: i["value"] for i in pic["items"]}
-    assert values["קרן פנסיה"] == 200000 and values["קרן השתלמות"] == 40000 and values["תיק השקעות"] == 10000.0
-    assert pic["can_save_monthly"] == 10000  # ההפקדה החודשית מהשיחה
     assert appmod.stage_flags(store, uid)["picture"]
 
     # 3. ניתוח ואישור
@@ -185,47 +180,16 @@ def old_form_answers():
                          restrictions_text="ישן", pension_value=5000, study_fund_value=7000, other_assets=9000).model_dump()
 
 
-def test_answers_come_only_from_profile_and_stage2_values():
+def test_answers_come_only_from_profile():
     store, uid = new_store()
     store.save_state(uid, "intake", old_form_answers())
     store.save_profile(uid, complete_profile(investment_goal="דירה", restrictions=["לא למכור: ZIM"]))
-    appmod.make_assets_handler(store, uid, FETCH)(18000, 30000, None, None, None)
     a = appmod.load_answers(store, uid)
     assert (a.age, a.can_save_monthly, a.horizon_label, a.goals) == (35, 10000, "7 עד 15 שנים", ["דירה"])
     assert a.restrictions_text == "לא למכור: ZIM"
-    assert (a.monthly_net_income, a.liquid_savings) == (18000, 30000)
-    assert a.monthly_expenses is None and a.status is None and a.pension_value is None  # לא מהטופס הישן
-
-
-def test_old_intake_in_db_does_not_reach_the_picture():
-    store, uid = new_store()
-    store.save_state(uid, "intake", old_form_answers())
-    pic = appmod.compute_picture(store, uid, FETCH)
-    values = {i["label"]: (i["value"], i["source"]) for i in pic["items"]}
-    for label in ("כסף נזיל וחסכונות בבנק", "קרן פנסיה", "קרן השתלמות", "נכסים אחרים"):
-        assert values[label] == (None, None)
-    assert pic["total"] is None and pic["monthly_net_income"] is None and pic["can_save_monthly"] is None
-    assert pic["emergency_months"] is None and pic["savings_rate"] is None
-    gaps = " ".join(pic["gaps"])
-    assert "חסרה הכנסה נטו" in gaps and "כסף נזיל" in gaps and "פנסיה" in gaps and "השתלמות" in gaps
-    assert not appmod.stage_flags(store, uid)["picture"]  # הטופס הישן לא נחשב כמידע לשלב 2
-    html = appmod.picture_html(pic)
-    for old in ("20,000", "50,000", "5,000", "7,000", "9,000"):
-        assert old not in html
-    assert "הכנסה נטו חודשית" in html and "—" in html
-
-
-def test_stage2_manual_values_fill_the_picture():
-    store, uid = new_store()
-    out = appmod.make_assets_handler(store, uid, FETCH)(18000, 30000, 100000, None, 0)
-    assert "הערכים נשמרו" in out[0] and store.load_state(uid, "assets")["liquid_savings"] == 30000
-    pic = appmod.compute_picture(store, uid, FETCH)
-    values = {i["label"]: (i["value"], i["source"]) for i in pic["items"]}
-    assert values["כסף נזיל וחסכונות בבנק"] == (30000, "הזנה ידנית") and values["קרן פנסיה"] == (100000, "הזנה ידנית")
-    assert pic["monthly_net_income"] == 18000 and not any("כסף נזיל" in g or "הכנסה" in g for g in pic["gaps"])
-    assert "₪18,000" in appmod.picture_html(pic)
-    bad = appmod.make_assets_handler(store, uid, FETCH)(-1, None, None, None, None)
-    assert "חיוביים" in bad[0] and store.load_state(uid, "assets")["monthly_net_income"] == 18000
+    # המספרים לניתוח באים מתמונת המצב של שלב 2, לא מכאן ולא מהטופס הישן
+    assert a.monthly_net_income is None and a.liquid_savings is None
+    assert a.monthly_expenses is None and a.status is None and a.pension_value is None
 
 
 def recording_llm(content, calls):
@@ -244,7 +208,9 @@ def test_analysis_uses_the_same_situation_as_stage2():
     store.upsert_holding(uid, "VT", 100)
     store.save_document(uid, {"doc_type": "fund_report", "period": "2026-Q1", "data": {}, "warnings": [],
                               "summary": {"fund_type": "pension", "fund_name": "קרן", "provider": "חברה", "balance_end": 250000.0}})
-    appmod.make_assets_handler(store, uid, FETCH)(18000, 1, 1, 1, 1)  # הזנה ידנית ששלב 2 לא מציג
+    # הזנה ידנית ישנה שעוד שמורה במסד: לא מוצגת בשלב 2 ולא נכנסת לניתוח
+    store.save_state(uid, "assets", {"monthly_net_income": 18000, "liquid_savings": 1, "pension_value": 1,
+                                     "study_fund_value": 1, "other_assets": 1})
     calls = []
     appmod.make_analysis_handler(store, uid, recording_llm(json.dumps(GUIDANCE, ensure_ascii=False), calls), "m", FETCH)()
     sent = json.loads(calls[0]["messages"][1]["content"])

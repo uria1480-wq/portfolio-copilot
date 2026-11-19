@@ -228,6 +228,57 @@ def test_stage2_manual_values_fill_the_picture():
     assert "חיוביים" in bad[0] and store.load_state(uid, "assets")["monthly_net_income"] == 18000
 
 
+def recording_llm(content, calls):
+    def create(**kw):
+        calls.append(kw)
+        if content is None:
+            raise RuntimeError("down")
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+    return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+
+
+def test_analysis_uses_the_same_situation_as_stage2():
+    from portfolio_copilot.situation import analysis_input, load_situation, situation_values
+    store, uid = new_store()
+    store.save_profile(uid, complete_profile())
+    store.upsert_holding(uid, "VT", 100)
+    store.save_document(uid, {"doc_type": "fund_report", "period": "2026-Q1", "data": {}, "warnings": [],
+                              "summary": {"fund_type": "pension", "fund_name": "קרן", "provider": "חברה", "balance_end": 250000.0}})
+    appmod.make_assets_handler(store, uid, FETCH)(18000, 1, 1, 1, 1)  # הזנה ידנית ששלב 2 לא מציג
+    calls = []
+    appmod.make_analysis_handler(store, uid, recording_llm(json.dumps(GUIDANCE, ensure_ascii=False), calls), "m", FETCH)()
+    sent = json.loads(calls[0]["messages"][1]["content"])
+    situation = load_situation(store, uid, FETCH)
+    shown = situation_values(situation)
+    assert sent["picture"] == analysis_input(situation)
+    values = {i["label"]: (i["value"], i["source"]) for i in sent["picture"]["items"]}
+    assert values["קרן פנסיה"] == (250000.0, "מסמך") and values["תיק השקעות"] == (10000.0, "מסמך")
+    assert values["כסף נזיל וחסכונות בבנק"] == (60000, "ראיון")
+    a = sent["answers"]
+    assert (a["monthly_net_income"], a["monthly_expenses"], a["can_save_monthly"], a["liquid_savings"]) == (
+        shown["monthly_net_income"], shown["monthly_expenses"], shown["monthly_deposit"], shown["liquid_savings"]) == (
+        40000, 15000, 10000, 60000)
+    assert a["pension_value"] == 250000.0 and a["other_assets"] == 0  # לא ה-1 מההזנה הידנית
+    assert sent["picture"]["total"] == situation["total"] and sent["picture"]["emergency_months"] == 4.0
+
+
+def test_unknown_field_stays_unknown_in_analysis():
+    store, uid = new_store()
+    store.save_profile(uid, complete_profile(monthly_deposit=None, liquid_savings=None,
+                                             unknown_fields=["monthly_deposit", "liquid_savings"]))
+    calls = []
+    out = appmod.make_analysis_handler(store, uid, recording_llm(None, calls), "m", FETCH)()
+    sent = json.loads(calls[0]["messages"][1]["content"])
+    assert sent["answers"]["can_save_monthly"] is None and sent["answers"]["liquid_savings"] is None
+    assert sent["picture"]["can_save_monthly"] is None and sent["picture"]["emergency_months"] is None
+    assert sent["picture"]["savings_rate"] is None
+    html = out[0]
+    assert "ניתוח בסיסי" in html and "מה חסר" in html
+    assert "כמה אפשר להפריש בחודש: אמרת שאתה לא יודע" in html and "כסף נזיל וחסכונות בבנק: אמרת שאתה לא יודע" in html
+    assert "להשלים כמה אפשר להפריש בחודש" in html and "תוכנית חודשית מוצעת" not in html
+    assert store.load_plan(uid).savings_value is None  # לא נשמרה תוכנית מ-0 מנוחש
+
+
 def test_horizon_labels_match_known_options():
     for years, expected in ((1, "עד 3 שנים"), (3, "עד 3 שנים"), (5, "3 עד 7 שנים"), (15, "7 עד 15 שנים"), (30, "יותר מ-15 שנים")):
         assert appmod.horizon_label(years) == expected and expected in HORIZON_OPTIONS

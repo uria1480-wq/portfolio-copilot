@@ -24,6 +24,7 @@ class Guidance(BaseModel):
     steps: list[Step] = Field(default_factory=list)
     plan: Optional[SavingsPlan] = None
     source: Literal["llm", "fallback"] = "llm"
+    missing: list[str] = Field(default_factory=list)  # הפערים מתמונת המצב, נקבעים בקוד ולא על ידי המודל
 
 
 def _cash_share(months: float | None) -> float:
@@ -53,7 +54,7 @@ def clamp_plan(plan: SavingsPlan, answers: IntakeAnswers) -> SavingsPlan:
 
 
 def default_guidance(answers: IntakeAnswers, picture: dict, suggested_risk: str, reasons: list[str] | None = None) -> Guidance:
-    can_save = answers.can_save_monthly or 0
+    can_save = answers.can_save_monthly  # None נשאר None: לא מנחשים 0
     income, months = picture.get("monthly_net_income"), picture.get("emergency_months")
     steps = []
     if months is not None and months < 3:
@@ -61,19 +62,26 @@ def default_guidance(answers: IntakeAnswers, picture: dict, suggested_risk: str,
     for gap in picture.get("gaps", []):
         if "פנסיה" in gap or "השתלמות" in gap:
             steps.append(Step(title="להשלים את תמונת החיסכון הפנסיוני", why=gap + ". בלי זה אי אפשר לדעת כמה כבר צבור."))
-    if can_save > 0:
+    if can_save is None:
+        steps.append(Step(title="להשלים כמה אפשר להפריש בחודש", why="בלי הסכום הזה אי אפשר לבנות תוכנית הפרשה."))
+    elif can_save > 0:
         steps.append(Step(title="להפריש בכל חודש", why=f"הפרשה של {can_save:,.0f} ₪ בחודש, כפי שציינת שאפשר."))
-    summary = (f"בהכנסה נטו של {income:,.0f} ₪ אפשר להפריש {can_save:,.0f} ₪ בחודש "
-               f"({can_save / income:.0%} מהנטו)." if income and can_save else "נבנתה תוכנית בסיסית מהתשובות שלך.")
+    if can_save is None:
+        summary = "חסר כמה אפשר להפריש בחודש, ולכן עדיין לא נבנתה תוכנית. ראה מה חסר למטה."
+    elif income and can_save:
+        summary = f"בהכנסה נטו של {income:,.0f} ₪ אפשר להפריש {can_save:,.0f} ₪ בחודש ({can_save / income:.0%} מהנטו)."
+    else:
+        summary = "נבנתה תוכנית בסיסית מהתשובות שלך."
     plan = None
-    if can_save > 0:
+    if can_save is not None and can_save > 0:
         plan = SavingsPlan(
             monthly_net_income=income, savings_mode="fixed", savings_value=can_save,
             buckets=_buckets(_cash_share(months)),
             rationale="תוכנית בסיסית מהתשובות שלך: ההפרשה היא הסכום שאמרת שאפשר, והחלוקה לפי כמה חודשי הוצאות מכוסים בכסף הנזיל.",
         )
     return Guidance(summary=summary, risk_level=suggested_risk if suggested_risk in LEVELS else None,
-                    risk_reasoning="; ".join(reasons or []), steps=steps, plan=plan, source="fallback")
+                    risk_reasoning="; ".join(reasons or []), steps=steps, plan=plan, source="fallback",
+                    missing=list(picture.get("gaps", [])))
 
 
 GUIDANCE_PROMPT = """אתה אנליסט תכנון פיננסי בפרויקט אקדמי בקורס מבוא לבינה מלאכותית. אתה לא יועץ מורשה.
@@ -141,6 +149,7 @@ def analyze(answers: IntakeAnswers, picture: dict, suggested_risk: str, reasons:
         guidance = _build(_parse_json(response.choices[0].message.content), answers, picture, fallback)
         if guidance.risk_level is None:
             guidance.risk_level = fallback.risk_level
+        guidance.missing = list(picture.get("gaps", []))
         return guidance
     except Exception as e:
         print("[analysis] הניתוח האוטומטי נכשל, מוצגת תוכנית בסיסית:", repr(e)[:300])

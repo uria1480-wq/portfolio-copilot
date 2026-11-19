@@ -14,7 +14,7 @@ from portfolio_copilot.plan import Bucket, SavingsPlan
 from portfolio_copilot.rag import KnowledgeBase, load_folder
 from portfolio_copilot.salary import plan_salary
 from portfolio_copilot.schemas import InvestorProfile
-from portfolio_copilot.situation import load_situation
+from portfolio_copilot.situation import analysis_answer_values, analysis_input, load_situation
 from portfolio_copilot.tools import parse_holdings_csv
 from portfolio_copilot.ui import (CSS, PROFILE_FIELD_LABELS, banner_html, documents_html, guidance_html, hero_html,
                                   holdings_html, intake_progress_html, knowledge_html, picture_html, plan_html,
@@ -208,10 +208,12 @@ def make_analysis_handler(store: Store, user_id: int, llm_client, model: str, fe
         if missing:
             return (banner_html("❌ השלם קודם את שיחת ההיכרות. חסר: " + ", ".join(missing)),
                     NOCHANGE(), NOCHANGE(), NOCHANGE(), NOCHANGE(), NOCHANGE(), NOCHANGE(), NOCHANGE())
-        answers = load_answers(store, user_id)
+        # אותו מצב שמוצג בשלב 2. המספרים באים ממנו, ומ-load_answers רק גיל, יעדים, אופק והגבלות
+        situation = load_situation(store, user_id, fetch)
+        answers = load_answers(store, user_id).model_copy(update=analysis_answer_values(situation))
         level = profile.recommended_risk_level  # רמת הסיכון שהמשתמש אישר בשיחה
         reasons = [profile.agent_reasoning] if profile.agent_reasoning else [f"רמת סיכון שאישרת בשיחה: {level}"]
-        guidance = analyze(answers, compute_picture(store, user_id, fetch), level, reasons, llm_client, model)
+        guidance = analyze(answers, analysis_input(situation), level, reasons, llm_client, model)
         store.save_state(user_id, "guidance", guidance.model_dump(mode="json"))
         plan = guidance.plan
         if plan:

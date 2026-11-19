@@ -108,6 +108,49 @@ def build_situation(profile: InvestorProfile, fund_reports: list[dict], payslips
     return {"sections": sections, "total": round(sum(known), 2) if known else None, "gaps": gaps}
 
 
+# שדה בתמונת המצב -> שם השדה ב-IntakeAnswers שהניתוח מקבל
+ANSWER_FIELDS = {
+    "monthly_net_income": "monthly_net_income",
+    "monthly_expenses": "monthly_expenses",
+    "monthly_deposit": "can_save_monthly",
+    "liquid_savings": "liquid_savings",
+    "monthly_debt_payments": "monthly_debt_payments",
+    "pension_balance": "pension_value",
+    "study_fund_balance": "study_fund_value",
+    "other_assets": "other_assets",
+}
+
+
+def situation_values(situation: dict) -> dict:
+    """ערך לכל שדה שמוצג בתמונת המצב. שדה לא ידוע או חסר הוא None, לא 0."""
+    return {r["key"]: r["value"] for s in situation["sections"] for r in s["rows"]}
+
+
+def analysis_answer_values(situation: dict) -> dict:
+    """הערכים המספריים לניתוח (שלב 3), בדיוק כפי שהם מוצגים בשלב 2."""
+    values = situation_values(situation)
+    return {answer_key: values.get(key) for key, answer_key in ANSWER_FIELDS.items()}
+
+
+def analysis_input(situation: dict) -> dict:
+    """תמונת המצב של שלב 2 במבנה שהניתוח מקבל: אותם ערכים, אותם מקורות ואותם פערים.
+    יחסים (חודשי חירום, שיעור חיסכון) מחושבים רק כששני הערכים ידועים, אחרת None."""
+    values = situation_values(situation)
+    items = [{"label": r["label"], "value": r["value"], "source": r["source"]}
+             for s in situation["sections"] for r in s["rows"] if r["key"] in ASSET_KEYS]
+    income, deposit = values.get("monthly_net_income"), values.get("monthly_deposit")
+    expenses, liquid = values.get("monthly_expenses"), values.get("liquid_savings")
+    return {
+        "items": items,
+        "total": situation["total"],
+        "monthly_net_income": income,
+        "can_save_monthly": deposit,
+        "savings_rate": round(deposit / income, 3) if income and deposit is not None else None,
+        "emergency_months": round(liquid / expenses, 1) if expenses and liquid is not None else None,
+        "gaps": list(situation["gaps"]),
+    }
+
+
 def load_situation(store, user_id: int, fetch=None) -> dict:
     """אוסף מה-Store את הפרופיל, המסמכים וההחזקות, ומחזיר את תמונת המצב לתצוגה."""
     holdings = store.list_holdings(user_id)

@@ -489,5 +489,9 @@ def guidance_html(g: Guidance, prefix: str = "") -> str:
                 + _field("כמה מפרישים", _value(rule))
                 + _field("לאן", _chips([f"{b.name} {b.share * 100:.0f}%" for b in g.plan.buckets])) + "</div>"
                 + (f'<div class="pc-quote">{esc(g.plan.rationale)}</div>' if g.plan.rationale else ""))
+    missing = ""
+    if g.missing:
+        missing = ('<div class="pc-section">מה חסר (הניתוח לא מניח ערך במקומו)</div><ul>'
+                   + "".join(f"<li>{esc(m)}</li>" for m in g.missing) + "</ul>")
     return head + (f'<div class="pc-card"><div class="pc-card-head"><h3>הניתוח שלי</h3></div>{note}'
-                   f'<div style="font-size:16px;line-height:1.7;margin-bottom:12px">{esc(g.summary)}</div>{risk}{steps_html}{plan}</div>')
+                   f'<div style="font-size:16px;line-height:1.7;margin-bottom:12px">{esc(g.summary)}</div>{risk}{steps_html}{plan}{missing}</div>')

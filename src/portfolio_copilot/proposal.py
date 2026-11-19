@@ -299,21 +299,35 @@ class MonthlyAllocation(BaseModel):
     reasons: list[str] = Field(default_factory=list)
 
 
-def allocate_monthly(profile: InvestorProfile, deposit: float, today: date | None = None) -> MonthlyAllocation:
+def emergency_deposited(history: list[dict]) -> float:
+    """סך מה שכבר הופנה לקרן החירום בדיווחים חודשיים קודמים (מההיסטוריה השמורה).
+    רשומות ישנות בלי allocation נספרות כ-0."""
+    total = sum(float((e.get("allocation") or {}).get("emergency_amount") or 0) for e in history)
+    return round(total, 2)
+
+
+def allocate_monthly(profile: InvestorProfile, deposit: float, today: date | None = None,
+                     already_in_emergency: float = 0.0) -> MonthlyAllocation:
     """מחלק הפקדה חודשית: קודם משלימים חוסר בקרן החירום (לכספית), והשאר לפי התמהיל של build_proposal.
+    החוסר = יעד פחות הנזיל בפרופיל פחות מה שכבר הופנה לקרן בדיווחים קודמים (already_in_emergency), ולא פחות מ-0.
     הסכומים מעוגלים כך שהסכום הכולל שווה בדיוק להפקדה. אין מכירות."""
     today = today or date.today()
     if deposit is None or deposit <= 0:
         raise ValueError("סכום ההשקעה החודש חייב להיות חיובי")
     deposit = round(float(deposit), 2)
+    already = round(max(0.0, float(already_in_emergency or 0)), 2)
     missing: list[str] = []
     reasons: list[str] = []
     need = _needs(profile, missing)
 
     emergency = 0.0
     if need("monthly_expenses", "liquid_savings"):
-        months, target, shortfall = _emergency(profile)
+        months, target, profile_shortfall = _emergency(profile)
         reasons.append(_emergency_reason(profile, months, target))
+        shortfall = round(max(0.0, profile_shortfall - already), 2)
+        if already and profile_shortfall:
+            reasons.append(f"בדיווחים קודמים כבר הופנו {_money(already)} לקרן החירום, "
+                           f"ולכן החוסר שנשאר הוא {_money(shortfall)}.")
         emergency = round(min(shortfall, deposit), 2)
         if emergency:
             reasons.append(f"חסרים {_money(shortfall)} בקרן החירום, ולכן {_money(emergency)} מההפקדה הולכים קודם לכספית.")
@@ -339,44 +353,109 @@ def allocate_monthly(profile: InvestorProfile, deposit: float, today: date | Non
                              unallocated=unallocated, missing=missing, reasons=reasons)
 
 
+def default_savings_percent(profile: InvestorProfile) -> float | None:
+    """ברירת המחדל לאחוז ההשקעה החודשי: monthly_deposit / monthly_net_income מהראיון, עד ספרה עשרונית אחת.
+    None אם אחד מהם חסר, הנטו 0, או שהתוצאה מעל 100%. לא ממציאים ערך."""
+    deposit, net = profile.monthly_deposit, profile.monthly_net_income
+    if deposit is None or not net:
+        return None
+    pct = round(deposit / net * 100, 1)
+    return None if pct > 100 else pct
+
+
+def partner_fields_shown(profile: InvestorProfile) -> bool:
+    """שדות בן/בת הזוג בדיווח החודשי מוצגים רק לנשוי או ידוע בציבור."""
+    return profile.marital_status in PARTNERED_STATUSES
+
+
 class MonthlyReport(BaseModel):
-    """דיווח חודשי אחד. period, net ו-set_aside נשמרים גם בהיסטוריה."""
+    """דיווח חודשי אחד. נשמר כ-JSON בהיסטוריה: הערכים שלך, של בן/בת הזוג (אם הוזנו) והסכומים המשותפים."""
     period: str
+    # שלך
     net: float
     pension_contributions: float = 0.0
     study_fund_contributions: float = 0.0
+    # בן/בת הזוג (None = לא הוזן). לא נשמר בפרופיל
+    partner_net: float | None = None
+    partner_pension: float | None = None
+    partner_study_fund: float | None = None
+    # משותף: שלך + בן/בת הזוג
+    household_net: float
+    total_pension: float
+    total_study_fund: float
+    percent_base: str | None = None        # "נטו שלך" או "נטו משותף", כשהסכום הוזן באחוזים
     set_aside: float
     free_to_spend: float
     total_saved_this_month: float
     allocation: MonthlyAllocation
 
 
+BASE_OWN = "נטו שלך"
+BASE_COMBINED = "נטו משותף"
+
+
+def _non_negative(*values):
+    if any(v is not None and v < 0 for v in values):
+        raise ValueError("הנטו וההפקדות לפנסיה ולהשתלמות לא יכולים להיות שליליים")
+
+
 def monthly_report(profile: InvestorProfile, net: float, pension: float | None, study_fund: float | None,
-                   amount_mode: str, amount_value: float, today: date | None = None) -> MonthlyReport:
-    """הדיווח החודשי: כמה מושקע החודש (סכום קבוע או אחוז מהנטו), ואיך הוא מתחלק (allocate_monthly).
-    amount_mode הוא "fixed" (שקלים) או "percent" (25 = 25% מהנטו). אין מכירות."""
+                   amount_mode: str, amount_value: float, today: date | None = None,
+                   partner_net: float | None = None, already_in_emergency: float = 0.0,
+                   partner_pension: float | None = None, partner_study_fund: float | None = None) -> MonthlyReport:
+    """הדיווח החודשי: כמה מושקע החודש (סכום קבוע או אחוז), ואיך הוא מתחלק (allocate_monthly).
+    amount_mode הוא "fixed" (שקלים) או "percent" (25 = 25%). האחוז חל על הנטו שלך,
+    ואם הוזן נטו בן/בת הזוג, על הנטו המשותף. פנסיה והשתלמות מסוכמות לשני בני הזוג. אין מכירות."""
     today = today or date.today()
+    if not partner_fields_shown(profile):
+        # השדות לא מוצגים למי שלא נשוי/בזוגיות, אז ערכים שנשארו בהם לא נספרים
+        partner_net = partner_pension = partner_study_fund = None
     if not net or net <= 0:
         raise ValueError("הזן כמה נכנס נטו החודש")
-    if any(v is not None and v < 0 for v in (pension, study_fund)):
-        raise ValueError("הפקדות לפנסיה ולהשתלמות לא יכולות להיות שליליות")
+    _non_negative(pension, study_fund, partner_net, partner_pension, partner_study_fund)
     if not amount_value or amount_value <= 0:
         raise ValueError("הזן כמה להשקיע החודש: סכום בשקלים או אחוז מהנטו")
+    combined = partner_net is not None
+    household = round(net + (partner_net or 0), 2)
+    base_label = BASE_COMBINED if combined else BASE_OWN
     if amount_mode == "percent":
         if amount_value > 100:
             raise ValueError("אחוז ההשקעה לא יכול לעלות על 100%")
-        deposit = round(net * amount_value / 100, 2)
+        deposit = round(household * amount_value / 100, 2)
     elif amount_mode == "fixed":
         deposit = round(float(amount_value), 2)
     else:
         raise ValueError(f"אופן חישוב לא מוכר: {amount_mode}")
-    if deposit > net:
-        raise ValueError("הסכום להשקעה גבוה מהנטו שנכנס החודש")
-    allocation = allocate_monthly(profile, deposit, today)
+    if deposit > household:
+        raise ValueError(f"הסכום להשקעה ({_money(deposit)}) גבוה מה{base_label} שנכנס החודש ({_money(household)})")
+    allocation = allocate_monthly(profile, deposit, today, already_in_emergency)
     if amount_mode == "percent":
-        allocation.reasons.insert(0, f"סכום להשקעה: {amount_value:g}% מנטו של {_money(net)} = {_money(deposit)}.")
-    pension, study_fund = round(pension or 0, 2), round(study_fund or 0, 2)
-    return MonthlyReport(period=today.strftime("%Y-%m"), net=round(net, 2), pension_contributions=pension,
-                         study_fund_contributions=study_fund, set_aside=deposit,
-                         free_to_spend=round(net - deposit, 2),
-                         total_saved_this_month=round(deposit + pension + study_fund, 2), allocation=allocation)
+        detail = (f"{_money(net)} שלך + {_money(partner_net)} של בן/בת הזוג = {_money(household)}" if combined
+                  else _money(net))
+        allocation.reasons.insert(0, f"סכום להשקעה: {amount_value:g}% מה{base_label} ({detail}) = {_money(deposit)}.")
+    own_pension, own_study = round(pension or 0, 2), round(study_fund or 0, 2)
+    p_pension = round(partner_pension, 2) if partner_pension is not None else None
+    p_study = round(partner_study_fund, 2) if partner_study_fund is not None else None
+    total_pension = round(own_pension + (p_pension or 0), 2)
+    total_study = round(own_study + (p_study or 0), 2)
+    return MonthlyReport(period=today.strftime("%Y-%m"), net=round(net, 2), pension_contributions=own_pension,
+                         study_fund_contributions=own_study,
+                         partner_net=round(partner_net, 2) if combined else None,
+                         partner_pension=p_pension, partner_study_fund=p_study,
+                         household_net=household, total_pension=total_pension, total_study_fund=total_study,
+                         percent_base=base_label if amount_mode == "percent" else None,
+                         set_aside=deposit, free_to_spend=round(household - deposit, 2),
+                         total_saved_this_month=round(deposit + total_pension + total_study, 2), allocation=allocation)
+
+
+def history_row(event: dict) -> dict:
+    """שורה בטבלת ההיסטוריה מדיווח שמור: סכומים משותפים. רשומות ישנות בלי השדות המשותפים נקראות מהשדות שלך."""
+    allocation = event.get("allocation") or {}
+    return {
+        "period": event.get("period") or "",
+        "household_net": event.get("household_net", event.get("net")),
+        "total_pension": event.get("total_pension", event.get("pension_contributions")),
+        "total_study_fund": event.get("total_study_fund", event.get("study_fund_contributions")),
+        "set_aside": event.get("set_aside"),
+        "emergency": allocation.get("emergency_amount") if allocation else None,
+    }

@@ -1,5 +1,5 @@
 from portfolio_copilot.schemas import InvestorProfile, merge_profile
-from portfolio_copilot.ui import (banner_html, documents_html, holdings_html, knowledge_html,
+from portfolio_copilot.ui import (banner_html, documents_html, holdings_html,
                                   profile_html, supported)
 
 
@@ -19,7 +19,6 @@ def test_user_text_is_escaped_everywhere():
     assert evil not in profile_html(p) and "&lt;script&gt;" in profile_html(p)
     assert evil not in holdings_html([{"symbol": evil, "quantity": 1, "avg_cost": None}])
     assert evil not in banner_html("❌ " + evil)
-    assert evil not in knowledge_html([evil], evil)
     doc = {"summary": {"period": evil, "net_to_bank": 1, "pension_monthly_total": 2}, "warnings": [evil]}
     assert evil not in documents_html([doc])
 
@@ -29,7 +28,6 @@ def test_empty_states_and_tables():
     table = holdings_html([{"symbol": "VT", "quantity": 20, "avg_cost": 98.5}])
     assert "VT" in table and "₪98" in table or "₪99" in table
     assert "עדיין לא הועלו" in documents_html([])
-    assert "ריקה" in knowledge_html([])
 
 
 def test_documents_show_warnings():

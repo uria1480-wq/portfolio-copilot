@@ -6,11 +6,11 @@ import gradio as gr
 from portfolio_copilot.agent import chat_step, client, MODEL_NAME
 from portfolio_copilot.db import Store
 from portfolio_copilot.documents import read_document
-from portfolio_copilot.proposal import build_proposal, monthly_report
-from portfolio_copilot.rag import KnowledgeBase, load_folder
+from portfolio_copilot.proposal import (build_proposal, default_savings_percent, emergency_deposited, monthly_report,
+                                        partner_fields_shown)
 from portfolio_copilot.schemas import InvestorProfile
 from portfolio_copilot.situation import load_situation
-from portfolio_copilot.ui import (CSS, banner_html, hero_html, intake_progress_html, knowledge_html,
+from portfolio_copilot.ui import (CSS, banner_html, hero_html, intake_progress_html,
                                   monthly_report_html, profile_html, proposal_html, salary_history_html,
                                   situation_html, stages_html, supported)
 
@@ -81,9 +81,14 @@ def make_intake_chat_handler(store: Store, user_id: int, kb=None, fetch=None):
 
 
 # ---------- שלב 2: המצב שלי ----------
+def current_situation(store: Store, user_id: int) -> dict:
+    """תמונת המצב: הפרופיל ועוד כל הדיווחים החודשיים. ההיסטוריה נקראת כאן ומועברת ל-situation.py."""
+    return load_situation(store, user_id, store.list_salary_events(user_id, limit=ALL_HISTORY))
+
+
 def make_refresh_handler(store: Store, user_id: int):
     def refresh():
-        return situation_html(load_situation(store, user_id)), stages_html(stage_flags(store, user_id))
+        return situation_html(current_situation(store, user_id)), stages_html(stage_flags(store, user_id))
 
     return refresh
 
@@ -97,15 +102,37 @@ def make_proposal_handler(store: Store, user_id: int):
 
 
 # ---------- ניהול חודשי ----------
-AMOUNT_MODES = {"סכום בשקלים": "fixed", "אחוז מהנטו": "percent"}
+PERCENT_MODE, FIXED_MODE = "אחוז מהנטו", "סכום קבוע בשקלים"
+AMOUNT_MODES = {PERCENT_MODE: "percent", FIXED_MODE: "fixed"}
+DEFAULT_PERCENT_INFO = "מחושב ממה שאמרת בראיון, אפשר לשנות"
+AMOUNT_LABEL = "אחוז מהנטו שלך (או מהנטו המשותף, אם הוזן נטו בן/בת הזוג), או סכום בשקלים"
+PARTNER_COMPONENTS = 4  # נטו, פנסיה, השתלמות ותלוש של בן/בת הזוג
+ALL_HISTORY = -1  # SQLite: LIMIT -1 הוא בלי הגבלה. קרן החירום והדשבורד סופרים את כל הדיווחים
+
+
+def make_monthly_defaults_handler(store: Store, user_id: int):
+    """ערכי פתיחה לדף הניהול החודשי מהפרופיל: מצב "אחוז מהנטו", האחוז מהראיון (או ריק),
+    ושדות בן/בת הזוג רק למי שנשוי/בזוגיות. בלי חישוב משלו."""
+    def defaults():
+        profile = store.load_profile(user_id)
+        pct = default_savings_percent(profile)
+        shown = partner_fields_shown(profile)
+        return (gr.update(value=PERCENT_MODE), gr.update(value=pct, info=DEFAULT_PERCENT_INFO if pct is not None else None),
+                *[gr.update(visible=shown) for _ in range(PARTNER_COMPONENTS)])
+
+    return defaults
 
 
 def make_monthly_handler(store: Store, user_id: int):
-    """דיווח חודשי: הפרופיל השמור + מה שהוזן -> monthly_report (קוד בלבד) -> HTML, ונשמר בהיסטוריה."""
-    def run(net, pension, study, mode_label, value):
+    """דיווח חודשי: הפרופיל השמור + מה שהוזן + מה שכבר הופנה לקרן החירום בהיסטוריה
+    -> monthly_report (קוד בלבד) -> HTML, ונשמר בהיסטוריה."""
+    def run(net, pension, study, mode_label, value, partner_net=None, partner_pension=None, partner_study=None):
         try:
+            already = emergency_deposited(store.list_salary_events(user_id, limit=ALL_HISTORY))
             report = monthly_report(store.load_profile(user_id), net, pension, study,
-                                    AMOUNT_MODES.get(mode_label, ""), value)
+                                    AMOUNT_MODES.get(mode_label, ""), value,
+                                    partner_net=partner_net, already_in_emergency=already,
+                                    partner_pension=partner_pension, partner_study_fund=partner_study)
         except ValueError as e:
             return salary_history_html(store.list_salary_events(user_id), prefix=f"❌ {e}")
         store.add_salary_event(user_id, report.model_dump(mode="json"))
@@ -114,19 +141,40 @@ def make_monthly_handler(store: Store, user_id: int):
     return run
 
 
+def _read_payslip(store: Store, user_id: int, file):
+    """קורא תלוש בקוד הקיים ושומר אותו. מחזיר (summary, None) או (None, הודעת שגיאה)."""
+    try:
+        doc = read_document(getattr(file, "name", file), client, MODEL_NAME)
+    except Exception as e:
+        return None, banner_html(f"❌ {e}")
+    store.save_document(user_id, doc)
+    return doc["summary"], None
+
+
 def make_payslip_handler(store: Store, user_id: int):
     """העלאת תלוש (אופציונלי): נקרא בקוד הקיים, נשמר, וממלא את שלושת השדות. אפשר לתקן לפני החישוב."""
     def upload(file):
         if not file:
             return NOCHANGE(), NOCHANGE(), NOCHANGE(), ""
-        try:
-            doc = read_document(getattr(file, "name", file), client, MODEL_NAME)
-        except Exception as e:
-            return NOCHANGE(), NOCHANGE(), NOCHANGE(), banner_html(f"❌ {e}")
-        store.save_document(user_id, doc)
-        s = doc["summary"]
+        s, error = _read_payslip(store, user_id, file)
+        if error:
+            return NOCHANGE(), NOCHANGE(), NOCHANGE(), error
         return (s.get("net_to_bank"), s.get("pension_monthly_total"), s.get("study_fund_monthly_total"),
                 banner_html("✅ התלוש נקרא והשדות מולאו. בדוק אותם לפני החישוב."))
+
+    return upload
+
+
+def make_partner_payslip_handler(store: Store, user_id: int):
+    """תלוש שני (בן/בת הזוג, אופציונלי): אותו קורא תלוש, ממלא נטו, פנסיה והשתלמות של בן/בת הזוג. לא נשמר בפרופיל."""
+    def upload(file):
+        if not file:
+            return NOCHANGE(), NOCHANGE(), NOCHANGE(), ""
+        s, error = _read_payslip(store, user_id, file)
+        if error:
+            return NOCHANGE(), NOCHANGE(), NOCHANGE(), error
+        return (s.get("net_to_bank"), s.get("pension_monthly_total"), s.get("study_fund_monthly_total"),
+                banner_html("✅ התלוש של בן/בת הזוג נקרא. האחוז יחושב על הנטו המשותף."))
 
     return upload
 
@@ -147,7 +195,7 @@ def _choice(value, choices):
     return value if value in choices else None
 
 
-def build_demo(store: Store, user_id: int, kb=None, kb_error=None):
+def build_demo(store: Store, user_id: int):
     """בונה את הממשק. מחזיר (demo, launch_kwargs)."""
     theme = gr.themes.Soft(primary_hue="indigo", neutral_hue="slate",
                            font=[gr.themes.GoogleFont("Heebo"), "Segoe UI", "Arial", "sans-serif"])
@@ -186,7 +234,7 @@ def build_demo(store: Store, user_id: int, kb=None, kb_error=None):
             with gr.Tab("2. המצב שלי", id="picture"):
                 gr.HTML('<div class="pc-card"><div class="pc-card-head"><h3>כל המידע במקום אחד</h3></div><div class="pc-empty">'
                         'הנתונים מגיעים משיחת ההיכרות.</div></div>')
-                picture_display = gr.HTML(situation_html(load_situation(store, user_id)))
+                picture_display = gr.HTML(situation_html(current_situation(store, user_id)))
                 with gr.Row():
                     refresh_btn = gr.Button("רענן תמונת מצב", variant="secondary")
                     to_monthly_btn = gr.Button("המשך לניהול חודשי", variant="primary")
@@ -194,7 +242,7 @@ def build_demo(store: Store, user_id: int, kb=None, kb_error=None):
                 proposal_display = gr.HTML("")
 
             # --- 3. ניהול חודשי ---
-            with gr.Tab("3. ניהול חודשי", id="monthly"):
+            with gr.Tab("3. ניהול חודשי", id="monthly") as monthly_tab:
                 gr.HTML('<div class="pc-card"><div class="pc-card-head"><h3>דיווח חודשי</h3></div><div class="pc-empty">'
                         'הזן את נתוני החודש, או העלה תלוש שימלא אותם. רמת הסיכון והתמהיל נלקחים מהפרופיל.</div></div>')
                 payslip_in = gr.File(label="תלוש שכר PDF (לא חובה)", file_types=[".pdf"])
@@ -203,11 +251,23 @@ def build_demo(store: Store, user_id: int, kb=None, kb_error=None):
                     net_in = gr.Number(label="נטו החודש (₪)")
                     pension_m_in = gr.Number(label="הפקדה לפנסיה (₪)")
                     study_m_in = gr.Number(label="הפקדה להשתלמות (₪)")
+                monthly_profile = store.load_profile(user_id)
+                partner_shown = partner_fields_shown(monthly_profile)
+                default_pct = default_savings_percent(monthly_profile)
+                partner_slip_in = gr.File(label="תלוש של בן/בת הזוג PDF (לא חובה)", file_types=[".pdf"],
+                                          visible=partner_shown)
                 with gr.Row():
-                    amount_mode_in = gr.Radio(list(AMOUNT_MODES), value="סכום בשקלים", label="כמה להשקיע החודש")
-                    amount_in = gr.Number(label="סכום בשקלים, או אחוז מהנטו (למשל 25)")
+                    partner_net_in = gr.Number(label="נטו בן/בת הזוג החודש (₪, לא חובה)", visible=partner_shown)
+                    partner_pension_in = gr.Number(label="פנסיה בן/בת הזוג החודש (₪, לא חובה)", visible=partner_shown)
+                    partner_study_in = gr.Number(label="השתלמות בן/בת הזוג החודש (₪, לא חובה)", visible=partner_shown)
+                partner_status = gr.HTML("")
+                with gr.Row():
+                    amount_mode_in = gr.Radio(list(AMOUNT_MODES), value=PERCENT_MODE, label="כמה להשקיע החודש")
+                    amount_in = gr.Number(**supported(gr.Number, label=AMOUNT_LABEL, value=default_pct,
+                                                      info=DEFAULT_PERCENT_INFO if default_pct is not None else None))
                 salary_btn = gr.Button("חשב חלוקה", variant="primary")
                 salary_display = gr.HTML(salary_history_html(store.list_salary_events(user_id)))
+                to_chat_btn = gr.Button("יש לי שאלה? דבר עם הסוכן", variant="secondary")
 
             # --- שאל את הסוכן ---
             with gr.Tab("שאל את הסוכן", id="chat"):
@@ -225,10 +285,9 @@ def build_demo(store: Store, user_id: int, kb=None, kb_error=None):
                         clear_btn = gr.Button("שיחה חדשה", size="sm", variant="secondary")
                     with gr.Column(scale=3):
                         profile_display = gr.HTML(profile_html(initial_profile))
-                        gr.HTML(knowledge_html(kb.sources() if kb is not None else [], kb_error))
 
         # --- חיווט ---
-        intake_chat = make_intake_chat_handler(store, user_id, kb)
+        intake_chat = make_intake_chat_handler(store, user_id)
         intake_outputs = [intake_msg, intake_chatbot, profile_state, intake_panel, profile_display, stages_display]
         intake_send.click(fn=intake_chat, inputs=[intake_msg, intake_chatbot, profile_state], outputs=intake_outputs)
         intake_msg.submit(fn=intake_chat, inputs=[intake_msg, intake_chatbot, profile_state], outputs=intake_outputs)
@@ -237,13 +296,24 @@ def build_demo(store: Store, user_id: int, kb=None, kb_error=None):
             fn=refresh, inputs=None, outputs=[picture_display, stages_display])
         refresh_btn.click(fn=refresh, inputs=None, outputs=[picture_display, stages_display])
         proposal_btn.click(fn=make_proposal_handler(store, user_id), inputs=None, outputs=proposal_display)
-        to_monthly_btn.click(fn=lambda: gr.Tabs(selected="monthly"), inputs=None, outputs=tabs)
+        monthly_defaults = make_monthly_defaults_handler(store, user_id)
+        defaults_outputs = [amount_mode_in, amount_in, partner_net_in, partner_pension_in, partner_study_in,
+                            partner_slip_in]
+        to_monthly_btn.click(fn=lambda: gr.Tabs(selected="monthly"), inputs=None, outputs=tabs).then(
+            fn=monthly_defaults, inputs=None, outputs=defaults_outputs)
+        monthly_tab.select(fn=monthly_defaults, inputs=None, outputs=defaults_outputs)
+        to_chat_btn.click(fn=lambda: gr.Tabs(selected="chat"), inputs=None, outputs=tabs)
         salary_btn.click(fn=make_monthly_handler(store, user_id),
-                         inputs=[net_in, pension_m_in, study_m_in, amount_mode_in, amount_in], outputs=salary_display)
+                         inputs=[net_in, pension_m_in, study_m_in, amount_mode_in, amount_in, partner_net_in,
+                                 partner_pension_in, partner_study_in],
+                         outputs=salary_display).then(
+            fn=refresh, inputs=None, outputs=[picture_display, stages_display])
+        partner_slip_in.upload(fn=make_partner_payslip_handler(store, user_id), inputs=partner_slip_in,
+                               outputs=[partner_net_in, partner_pension_in, partner_study_in, partner_status])
         payslip_in.upload(fn=make_payslip_handler(store, user_id), inputs=payslip_in,
                           outputs=[net_in, pension_m_in, study_m_in, payslip_status])
 
-        chat = make_chat_handler(store, user_id, kb)
+        chat = make_chat_handler(store, user_id)
         chat_outputs = [msg_input, chatbot, profile_state, profile_display]
         send_btn.click(fn=chat, inputs=[msg_input, chatbot, profile_state], outputs=chat_outputs)
         msg_input.submit(fn=chat, inputs=[msg_input, chatbot, profile_state], outputs=chat_outputs)
@@ -272,14 +342,7 @@ def main(argv=None):
         print("[app] --fresh: מסד נתונים בזיכרון. שום דבר מההרצה הזו לא יישמר.")
     user_id = store.get_or_create_user(USER_NAME)
 
-    kb, kb_error = None, None
-    try:
-        kb = KnowledgeBase("data/chroma")
-        load_folder(kb, "knowledge")
-    except Exception as e:  # האפליקציה ממשיכה לעבוד גם אם הטמעת המסמכים נכשלה
-        kb_error = str(e)
-
-    demo, launch_kwargs = build_demo(store, user_id, kb, kb_error)
+    demo, launch_kwargs = build_demo(store, user_id)
     launch_kwargs.update(share=True, auth=("family", "u12345"))
     demo.launch(**launch_kwargs)
 

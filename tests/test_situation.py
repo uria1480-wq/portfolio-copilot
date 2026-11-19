@@ -101,3 +101,61 @@ def test_situation_html_renders_dash_sources_and_escapes():
     assert evil not in html and "&lt;script&gt;" in html
     assert "—" in html and "ראיון" in html and "pc-banner-ok" in html
     assert "מה עוד חסר" in html and "עדיין אין נכסים ידועים" in html
+
+
+
+# ---------- דיווחים חודשיים בדשבורד ----------
+BASE = InvestorProfile(age=40, liquid_savings=50000, pension_balance=100000, study_fund_balance=40000, other_assets=0)
+
+
+def report(set_aside, pension, study, **extra):
+    return {"period": "2026-11", "net": 20000, "set_aside": set_aside, "pension_contributions": pension,
+            "study_fund_contributions": study, "total_pension": pension, "total_study_fund": study, **extra}
+
+
+def test_without_history_dashboard_is_unchanged():
+    assert build_situation(BASE, []) == build_situation(BASE) == build_situation(BASE, None)
+    assert situation_html(build_situation(BASE, [])) == situation_html(build_situation(BASE))
+    assert all(r["added"] is None and r["detail"] is None for r in rows(build_situation(BASE)).values())
+
+
+def test_three_reports_add_up_with_separate_source():
+    history = [report(3000, 2000, 800), report(4000, 2000, 800), report(5000, 2100, 900)]
+    view = build_situation(BASE, history)
+    r = rows(view)
+    assert (r["liquid_savings"]["value"], r["liquid_savings"]["added"]) == (62000, 12000)
+    assert (r["pension_balance"]["value"], r["pension_balance"]["added"]) == (106100, 6100)
+    assert (r["study_fund_balance"]["value"], r["study_fund_balance"]["added"]) == (42500, 2500)
+    assert r["other_assets"]["added"] is None and r["age"]["added"] is None
+    liquid = r["liquid_savings"]
+    assert liquid["source"] == "ראיון" and liquid["added_source"] == "דיווח חודשי"
+    assert liquid["detail"] == "₪50,000 מהראיון + ₪12,000 מדיווחים חודשיים"
+    assert view["total"] == 62000 + 106100 + 42500 + 0
+    html = situation_html(view)
+    assert "דיווח חודשי" in html and "₪50,000 מהראיון + ₪12,000 מדיווחים חודשיים" in html
+
+
+def test_partner_contributions_are_included():
+    married = report(5000, 2000, 800, partner_pension=1500, partner_study_fund=600, total_pension=3500,
+                     total_study_fund=1400)
+    r = rows(build_situation(BASE, [married]))
+    assert r["pension_balance"]["value"] == 103500 and r["study_fund_balance"]["value"] == 41400
+
+
+def test_old_reports_without_combined_fields_use_own_values():
+    old = {"period": "2026-01", "net": 9000, "set_aside": 1000, "pension_contributions": 700}
+    r = rows(build_situation(BASE, [old]))
+    assert (r["liquid_savings"]["value"], r["pension_balance"]["value"], r["study_fund_balance"]["value"]) == (
+        51000, 100700, 40000)
+
+
+def test_missing_base_is_not_invented():
+    r = rows(build_situation(InvestorProfile(age=40), [report(3000, 0, 0)]))
+    assert r["liquid_savings"]["value"] is None and r["liquid_savings"]["added"] == 3000
+    assert "הבסיס מהראיון חסר" in r["liquid_savings"]["detail"]
+
+
+def test_profile_is_not_changed_by_history():
+    profile = BASE.model_copy()
+    build_situation(profile, [report(3000, 2000, 800)])
+    assert profile == BASE

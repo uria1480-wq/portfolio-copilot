@@ -317,7 +317,7 @@ def test_monthly_report_fixed_and_percent():
 
 @pytest.mark.parametrize("args, message", [
     ((0, None, None, "fixed", 100), "נטו"),
-    ((1000, -1, None, "fixed", 100), "שליליות"),
+    ((1000, -1, None, "fixed", 100), "שליליים"),
     ((1000, None, None, "fixed", 0), "כמה להשקיע"),
     ((1000, None, None, "percent", 120), "100%"),
     ((1000, None, None, "fixed", 2000), "גבוה מהנטו"),
@@ -326,3 +326,114 @@ def test_monthly_report_fixed_and_percent():
 def test_monthly_report_rejects_bad_input(args, message):
     with pytest.raises(ValueError, match=message):
         monthly_report(person(), *args, today=TODAY)
+
+
+# ---------- ברירת מחדל לאחוז (משימה 3) ----------
+from portfolio_copilot.proposal import default_savings_percent, emergency_deposited, partner_fields_shown  # noqa: E402
+
+
+@pytest.mark.parametrize("deposit, net, expected", [
+    (3000, 20000, 15.0),
+    (1000, 3000, 33.3),      # 33.333 -> ספרה עשרונית אחת
+    (20000, 20000, 100.0),
+    (None, 20000, None),     # הפקדה חסרה
+    (3000, None, None),      # נטו חסר
+    (3000, 0, None),         # נטו 0
+    (30000, 20000, None),    # מעל 100%
+])
+def test_default_savings_percent(deposit, net, expected):
+    assert default_savings_percent(InvestorProfile(monthly_deposit=deposit, monthly_net_income=net)) == expected
+
+
+# ---------- קרן חירום מצטברת (משימה 4) ----------
+def emergency_person():
+    return person(monthly_expenses=10000, liquid_savings=30000)  # יעד 60,000, חוסר 30,000
+
+
+def test_first_month_with_big_shortfall_goes_all_to_money_market():
+    r = allocate_monthly(emergency_person(), 5000, TODAY, already_in_emergency=0)
+    assert r.emergency_amount == 5000 and r.lines == [] and total(r) == 5000
+
+
+def test_second_month_counts_previous_deposit():
+    first = allocate_monthly(emergency_person(), 5000, TODAY)
+    second = allocate_monthly(emergency_person(), 5000, TODAY, already_in_emergency=first.emergency_amount)
+    assert second.emergency_amount == 5000
+    assert any("כבר הופנו ₪5,000" in x and "₪25,000" in x for x in second.reasons)
+    last = allocate_monthly(emergency_person(), 5000, TODAY, already_in_emergency=28000)  # נשארו 2,000
+    assert last.emergency_amount == 2000 and round(sum(line.amount for line in last.lines), 2) == 3000
+
+
+def test_filled_emergency_means_all_by_mix():
+    r = allocate_monthly(emergency_person(), 5000, TODAY, already_in_emergency=30000)
+    assert r.emergency_amount == 0 and round(sum(line.amount for line in r.lines), 2) == 5000
+    r = allocate_monthly(emergency_person(), 5000, TODAY, already_in_emergency=45000)  # יותר מהחוסר: לא שלילי
+    assert r.emergency_amount == 0 and total(r) == 5000
+
+
+@pytest.mark.parametrize("already", [0, 1, 4999.99, 25000, 29999.5, 30000, 99999])
+@pytest.mark.parametrize("deposit", [1, 1234.57, 5000, 77777.77])
+def test_total_equals_deposit_with_history(already, deposit):
+    assert total(allocate_monthly(emergency_person(), deposit, TODAY, already_in_emergency=already)) == round(deposit, 2)
+
+
+def test_emergency_deposited_sums_history_and_ignores_old_records():
+    history = [{"allocation": {"emergency_amount": 5000}}, {"allocation": {"emergency_amount": 1234.5}},
+               {"net": 9000, "set_aside": 1000}]  # רשומה ישנה בלי allocation
+    assert emergency_deposited(history) == 6234.5 and emergency_deposited([]) == 0
+
+
+# ---------- נשואים / בזוגיות (משימה 5) ----------
+def test_partner_fields_only_for_partnered():
+    assert partner_fields_shown(person(marital_status="נשוי")) and partner_fields_shown(person(marital_status="ידוע בציבור"))
+    for status in ("רווק", "גרוש", "אלמן", None):
+        assert not partner_fields_shown(person(marital_status=status))
+
+
+def test_married_percent_on_own_net_without_partner_net():
+    r = monthly_report(person(marital_status="נשוי"), 20000, None, None, "percent", 10, TODAY)
+    assert r.set_aside == 2000 and r.percent_base == "נטו שלך" and r.partner_net is None
+    assert "10% מהנטו שלך (₪20,000)" in r.allocation.reasons[0]
+
+
+def test_married_percent_on_combined_net_with_partner_net():
+    r = monthly_report(person(marital_status="נשוי"), 20000, None, None, "percent", 10, TODAY, partner_net=15000)
+    assert r.set_aside == 3500 and r.percent_base == "נטו משותף" and r.partner_net == 15000
+    assert r.free_to_spend == 31500
+    assert "10% מהנטו משותף (₪20,000 שלך + ₪15,000 של בן/בת הזוג = ₪35,000)" in r.allocation.reasons[0]
+
+
+def test_fixed_amount_with_partner_net_has_no_percent_base():
+    r = monthly_report(person(marital_status="נשוי"), 20000, None, None, "fixed", 3000, TODAY, partner_net=15000)
+    assert r.set_aside == 3000 and r.percent_base is None and r.partner_net == 15000
+
+
+def test_single_person_partner_net_is_ignored():
+    r = monthly_report(person(marital_status="רווק"), 20000, None, None, "percent", 10, TODAY, partner_net=15000)
+    assert r.set_aside == 2000 and r.partner_net is None and r.percent_base == "נטו שלך"
+
+
+def test_negative_partner_net_is_rejected():
+    for bad in (dict(partner_net=-1), dict(partner_pension=-1), dict(partner_study_fund=-1)):
+        with pytest.raises(ValueError, match="שליליים"):
+            monthly_report(person(marital_status="נשוי"), 20000, None, None, "fixed", 100, TODAY, **bad)
+
+
+
+def test_partner_pension_and_study_are_summed():
+    r = monthly_report(person(marital_status="נשוי"), 20000, 2000, 800, "percent", 10, TODAY,
+                       partner_net=15000, partner_pension=1500, partner_study_fund=600)
+    assert (r.household_net, r.total_pension, r.total_study_fund) == (35000, 3500, 1400)
+    assert r.set_aside == 3500 and r.total_saved_this_month == 3500 + 3500 + 1400
+
+
+def test_partner_pension_without_partner_net_still_counts_but_percent_is_on_own_net():
+    r = monthly_report(person(marital_status="נשוי"), 20000, 2000, None, "percent", 10, TODAY, partner_pension=1500)
+    assert r.set_aside == 2000 and r.percent_base == "נטו שלך" and r.total_pension == 3500
+
+
+def test_single_person_partner_pension_and_study_are_ignored():
+    r = monthly_report(person(marital_status="רווק"), 20000, 2000, 800, "fixed", 1000, TODAY,
+                       partner_net=15000, partner_pension=1500, partner_study_fund=600)
+    assert (r.household_net, r.total_pension, r.total_study_fund) == (20000, 2000, 800)
+    assert r.partner_pension is None and r.partner_study_fund is None

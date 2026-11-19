@@ -3,7 +3,7 @@ import html
 import inspect
 
 from portfolio_copilot.plan import SavingsPlan
-from portfolio_copilot.proposal import MONEY_MARKET, MonthlyReport, Proposal
+from portfolio_copilot.proposal import MONEY_MARKET, MonthlyReport, Proposal, history_row
 from portfolio_copilot.schemas import InvestorProfile
 
 
@@ -299,16 +299,6 @@ def documents_html(docs: list[dict], prefix: str = "") -> str:
     return head + f'<div class="pc-card">{title}{body}</div>'
 
 
-def knowledge_html(sources: list[str], error: str | None = None) -> str:
-    head = banner_html(f"❌ {error}") if error else ""
-    title = '<div class="pc-card-head"><h3>מסמכי ידע</h3></div>'
-    if not sources:
-        body = '<div class="pc-empty">התיקייה <code>knowledge</code> ריקה. הוסף אליה קבצי .md או .txt עם לוחות עמלות ותקנונים.</div>'
-    else:
-        body = '<div class="pc-empty">הסוכן עונה על שאלות עמלות ומס רק מתוך המסמכים האלה:</div>' + _chips(sources)
-    return head + f'<div class="pc-card">{title}{body}</div>'
-
-
 def plan_html(plan: SavingsPlan, prefix: str = "") -> str:
     head = banner_html(prefix)
     title = '<div class="pc-card-head"><h3>תוכנית החיסכון החודשית</h3>'
@@ -357,9 +347,13 @@ def salary_history_html(events: list[dict], prefix: str = "") -> str:
     head = banner_html(prefix)
     if not events:
         return head + '<div class="pc-card"><div class="pc-card-head"><h3>היסטוריה</h3></div><div class="pc-empty">עדיין לא נרשמו משכורות.</div></div>'
-    rows = "".join(f'<tr><td>{esc(e.get("period") or "")}</td><td>{_money(e["net"])}</td><td>{_money(e["set_aside"])}</td></tr>' for e in events)
+    cells = ("household_net", "total_pension", "total_study_fund", "set_aside", "emergency")
+    rows = "".join(
+        f'<tr><td>{esc(r["period"])}</td>' + "".join(f"<td>{_amount(r[k])}</td>" for k in cells) + "</tr>"
+        for r in map(history_row, events))
     return head + ('<div class="pc-card"><div class="pc-card-head"><h3>היסטוריה</h3></div>'
-                   '<table class="pc-table"><tr><th>חודש</th><th>נטו</th><th>הופרש</th></tr>' + rows + "</table></div>")
+                   '<table class="pc-table"><tr><th>חודש</th><th>נטו משותף</th><th>פנסיה</th><th>השתלמות</th>'
+                   '<th>הופקד</th><th>מזה לקרן חירום</th></tr>' + rows + "</table></div>")
 
 
 # --- מסע המשתמש: שלבים ותמונת מצב ---
@@ -436,8 +430,10 @@ def situation_html(view: dict, prefix: str = "") -> str:
     for section in view["sections"]:
         rows = "".join(
             f'<tr><td>{esc(r["label"])}</td>'
-            f'<td>{_value(r["display"], muted=r["value"] is None)}</td>'
-            f'<td>{_chips([r["source"]]) if r["source"] else ""}</td></tr>' for r in section["rows"])
+            f'<td>{_value(r["display"], muted=r["value"] is None)}'
+            + (f'<div class="pc-empty">{esc(r["detail"])}</div>' if r.get("detail") else "") + "</td>"
+            f'<td>{_chips([x for x in (r["source"], r.get("added_source")) if x]) if r["source"] or r.get("added_source") else ""}</td></tr>'
+            for r in section["rows"])
         body += (f'<div class="pc-section">{esc(section["title"])}</div>'
                  '<table class="pc-table"><tr><th>נתון</th><th>ערך</th><th>מקור</th></tr>' + rows + "</table>")
     gaps = ""
@@ -508,7 +504,8 @@ def proposal_html(p: Proposal) -> str:
         missing = _card("מה חסר כדי להשלים את ההצעה", _bullets(labels))
     notes = _card("הערות", _bullets(p.notes)) if p.notes else ""
     reasons = _card("על מה ההצעה מבוססת", _bullets(p.reasons)) if p.reasons else ""
-    return (banner_html("הצעה בסוגי נכסים, מחושבת בקוד לפי הפרופיל שלך. ההחלטה שלך.") + missing
+    return (banner_html("הצעה בסוגי נכסים, מחושבת בקוד לפי הפרופיל שלך. ההחלטה שלך.")
+            + '<div class="pc-empty">לפי המצב שהוזן בראיון</div>' + missing
             + _card("1. ביטחון: קרן חירום וחובות", safety) + _card("2. ההון הקיים", capital)
             + _card("3. פנסיה והשתלמות", pension) + notes + reasons)
 
@@ -525,8 +522,18 @@ def monthly_report_html(r: MonthlyReport) -> str:
     if a.unallocated:
         rows.append(f'<tr><td>לא חולק (חסרים נתונים)</td><td>{_money(a.unallocated)}</td></tr>')
     table = ('<table class="pc-table"><tr><th>לאן</th><th>סכום</th></tr>' + "".join(rows) + "</table>")
-    summary = (f'<div class="pc-grid" style="margin-top:12px">{_field("נשאר להוצאות", _value(_money(r.free_to_spend)))}'
-               f'{_field("הפקדות לפנסיה ולהשתלמות", _value(f"{_money(r.pension_contributions)} · {_money(r.study_fund_contributions)}"))}'
+    base = (_field("האחוז חושב על", _value(r.percent_base)) if r.percent_base else "")
+    has_partner = any(v is not None for v in (r.partner_net, r.partner_pension, r.partner_study_fund))
+    partner = ""
+    if has_partner:
+        partner = (_field("נטו: שלך · בן/בת הזוג · משותף",
+                          _value(f"{_money(r.net)} · {_amount(r.partner_net)} · {_money(r.household_net)}"))
+                   + _field("פנסיה: שלך · בן/בת הזוג · סה\"כ",
+                            _value(f"{_money(r.pension_contributions)} · {_amount(r.partner_pension)} · {_money(r.total_pension)}"))
+                   + _field("השתלמות: שלך · בן/בת הזוג · סה\"כ",
+                            _value(f"{_money(r.study_fund_contributions)} · {_amount(r.partner_study_fund)} · {_money(r.total_study_fund)}")))
+    summary = (f'<div class="pc-grid" style="margin-top:12px">{base}{partner}{_field("נשאר להוצאות", _value(_money(r.free_to_spend)))}'
+               f'{_field("הפקדות לפנסיה ולהשתלמות", _value(f"{_money(r.total_pension)} · {_money(r.total_study_fund)}"))}'
                f'{_field("סך החיסכון החודש", _value(_money(r.total_saved_this_month)))}</div>')
     missing = ""
     if a.missing:
@@ -534,6 +541,6 @@ def monthly_report_html(r: MonthlyReport) -> str:
                    + _bullets([PROFILE_FIELD_LABELS.get(m, m) for m in a.missing]))
     why = '<div class="pc-section">למה</div>' + _bullets(a.reasons)
     return (f'<div class="pc-card"><div class="pc-card-head"><h3>דיווח חודשי: {esc(r.period)}</h3>'
-            f'<span class="pc-chip pc-chip-idle">נטו {esc(_money(r.net))}</span></div>'
+            f'<span class="pc-chip pc-chip-idle">נטו {esc(_money(r.household_net))}</span></div>'
             '<div class="pc-empty">הצעה לאישור, בסוגי נכסים. לא בוצע כלום, ואין הצעות מכירה.</div>'
             f'<div class="pc-section">מה לעשות עם {esc(_money(r.set_aside))}</div>{table}{summary}{missing}{why}</div>')

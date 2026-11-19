@@ -1,4 +1,5 @@
 import json
+from datetime import date
 from types import SimpleNamespace
 
 from portfolio_copilot.analysis import Guidance, analyze, clamp_plan, default_guidance
@@ -59,6 +60,19 @@ def test_broken_model_answer_falls_back_to_rule_based_guidance(capsys):
 def test_missing_risk_level_in_model_answer_uses_the_questionnaire_result():
     g = analyze(A, PIC, "שמרני", [], fake_client(json.dumps({**GOOD, "risk_level": "לא ברור"}, ensure_ascii=False)), "m")
     assert g.risk_level == "שמרני"
+
+
+def test_analysis_prompt_includes_injected_date():
+    seen = []
+    msg = SimpleNamespace(content=json.dumps(GOOD, ensure_ascii=False))
+
+    def create(**kw):
+        seen.append(kw["messages"])
+        return SimpleNamespace(choices=[SimpleNamespace(message=msg)])
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    analyze(A, PIC, "מאוזן", [], client, "m", today=date(2026, 11, 19))
+    assert "התאריך היום: 2026-11-19" in seen[0][0]["content"]
 
 
 def test_guidance_roundtrips_through_json_for_storage():

@@ -1,5 +1,6 @@
 """חיבור הכלים לסוכן: הגדרות הכלים שה-LLM רואה, והפונקציה שמריצה אותם."""
 import re
+from datetime import date
 
 from portfolio_copilot.plan import SavingsPlan
 from portfolio_copilot.salary import plan_salary
@@ -18,7 +19,9 @@ PROFILE_TOOL_SPECS = [
                 "שלח רק שדות שהמשתמש אמר במפורש. risk_confirmed=true רק אם המשתמש אישר במפורש את רמת הסיכון. "
                 "אם המשתמש אמר שהוא לא יודע, שלח את שם השדה ב-unknown_fields. אם אמר שאין לו, שלח אותו ב-none_fields. "
                 "אל תמציא מספר או 0 בעצמך. הכנסת בן/בת הזוג נשאלת רק אם marital_status הוא נשוי או ידוע בציבור. "
-                "אם המשתמש אמר שבן/בת הזוג לא עובד/ת או בלי הכנסה, שלח spouse_monthly_net_income ב-none_fields."
+                "אם המשתמש אמר שבן/בת הזוג לא עובד/ת או בלי הכנסה, שלח spouse_monthly_net_income ב-none_fields. "
+                "אם המשתמש נקב בשנת יעד (למשל 2029), שלח target_year ולא investment_horizon_years: הקוד מחשב את האופק "
+                "בשנים מול התאריך של היום. אל תחשב שנים בעצמך."
             ),
             "parameters": {
                 "type": "object",
@@ -30,6 +33,10 @@ PROFILE_TOOL_SPECS = [
                     "needs_cashflow": {"type": "boolean"},
                     "investment_goal": {"type": "string"},
                     "investment_horizon_years": {"type": "integer", "description": "אופק בשנים, 1 עד 80"},
+                    "target_year": {
+                        "type": "integer",
+                        "description": "שנת יעד שהמשתמש אמר, למשל 2029. הקוד מחשב ממנה את investment_horizon_years (1 עד 80)",
+                    },
                     "recommended_risk_level": {"type": "string", "enum": list(RISK_LEVELS)},
                     "risk_confirmed": {"type": "boolean"},
                     "max_single_asset_weight": {"type": "number", "description": "תקרת משקל לנכס בודד, 0.05 עד 1"},
@@ -222,12 +229,14 @@ def _profile_status(profile: InvestorProfile) -> dict:
 
 
 def run_profile_tool(name: str, args: dict, profile: InvestorProfile,
-                     store=None, user_id: int | None = None, fetch=None) -> tuple[dict, InvestorProfile]:
-    """מריץ כלי שמשנה את הפרופיל. מחזיר (תוצאה למודל, פרופיל מעודכן). הפרופיל לא משתנה כשיש שגיאה."""
+                     store=None, user_id: int | None = None, fetch=None,
+                     today: date | None = None) -> tuple[dict, InvestorProfile]:
+    """מריץ כלי שמשנה את הפרופיל. מחזיר (תוצאה למודל, פרופיל מעודכן). הפרופיל לא משתנה כשיש שגיאה.
+    today משמש לחישוב אופק משנת יעד (ברירת מחדל: date.today())."""
     args = args if isinstance(args, dict) else {}
 
     if name == "update_profile":
-        new_profile, accepted, rejected = apply_profile_update(profile, args)
+        new_profile, accepted, rejected = apply_profile_update(profile, args, today)
         return {"accepted": accepted, "rejected": rejected, **_profile_status(new_profile)}, new_profile
 
     if name == "add_restriction":

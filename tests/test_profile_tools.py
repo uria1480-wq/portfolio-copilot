@@ -1,5 +1,6 @@
 """בניית פרופיל בשיחה (update_profile) והגבלות "לא מוכר" (add_restriction), עם מודל מדומה."""
 import json
+from datetime import date
 
 from test_agent_flow import Call, FakeClient, Msg  # קודם: מגדיר משתני סביבה לפני יבוא agent
 from portfolio_copilot import agent
@@ -72,6 +73,45 @@ def test_invalid_values_are_rejected_with_reason_and_old_value_kept():
 def test_bool_is_not_a_number_and_fraction_is_not_an_age():
     _, _, rejected = apply_profile_update(InvestorProfile(), {"age": True, "investment_horizon_years": 2.5})
     assert set(rejected) == {"age", "investment_horizon_years"}
+
+
+TODAY = date(2026, 11, 19)
+
+
+def test_target_year_sets_horizon_computed_in_code():
+    p, accepted, rejected = apply_profile_update(InvestorProfile(), {"target_year": 2029}, today=TODAY)
+    assert p.investment_horizon_years == 3 and rejected == {}
+    assert accepted == {"target_year": 2029, "investment_horizon_years": 3}
+
+
+def test_past_target_year_is_rejected_with_reason():
+    start = InvestorProfile(investment_horizon_years=10)
+    p, accepted, rejected = apply_profile_update(start, {"target_year": 2026}, today=TODAY)
+    assert accepted == {} and p == start
+    assert "2026" in rejected["target_year"] and "לא בעתיד" in rejected["target_year"]
+
+
+def test_too_far_target_year_is_rejected_with_reason():
+    p, accepted, rejected = apply_profile_update(InvestorProfile(), {"target_year": 2107}, today=TODAY)
+    assert accepted == {} and p.investment_horizon_years is None
+    assert "רחוקה מדי" in rejected["target_year"] and "80" in rejected["target_year"]
+
+
+def test_target_year_80_years_ahead_is_the_limit():
+    p, _, rejected = apply_profile_update(InvestorProfile(), {"target_year": 2106}, today=TODAY)
+    assert p.investment_horizon_years == 80 and rejected == {}
+
+
+def test_target_year_must_be_whole_number():
+    _, _, rejected = apply_profile_update(InvestorProfile(), {"target_year": "בקרוב"}, today=TODAY)
+    assert "target_year" in rejected
+
+
+def test_update_profile_tool_passes_date_and_spec_has_target_year():
+    result, p = run_profile_tool("update_profile", {"target_year": 2029}, InvestorProfile(), today=TODAY)
+    assert p.investment_horizon_years == 3 and result["accepted"]["investment_horizon_years"] == 3
+    fn = next(t for t in tool_specs(False) if t["function"]["name"] == "update_profile")["function"]
+    assert "target_year" in fn["parameters"]["properties"] and "target_year" in fn["description"]
 
 
 def test_cannot_confirm_risk_without_level():

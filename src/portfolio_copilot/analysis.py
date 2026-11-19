@@ -2,6 +2,7 @@
 אם המודל נכשל, מוצגת תוכנית בסיסית שנגזרת מהתשובות בקוד."""
 import json
 import re
+from datetime import date
 from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
@@ -135,7 +136,10 @@ def _build(data: dict, answers: IntakeAnswers, picture: dict, fallback: Guidance
     return guidance
 
 
-def analyze(answers: IntakeAnswers, picture: dict, suggested_risk: str, reasons: list[str], client, model: str) -> Guidance:
+def analyze(answers: IntakeAnswers, picture: dict, suggested_risk: str, reasons: list[str], client, model: str,
+            today: date | None = None) -> Guidance:
+    """today נכנס להנחיה כדי שהמודל לא יניח שנה אחרת (ברירת מחדל: date.today())."""
+    today = today or date.today()
     fallback = default_guidance(answers, picture, suggested_risk, reasons)
     payload = {"answers": answers.model_dump(), "picture": {k: picture[k] for k in
                ("items", "total", "monthly_net_income", "can_save_monthly", "savings_rate", "emergency_months", "gaps")},
@@ -143,7 +147,7 @@ def analyze(answers: IntakeAnswers, picture: dict, suggested_risk: str, reasons:
     try:
         response = client.chat.completions.create(
             model=model, temperature=0.3,
-            messages=[{"role": "system", "content": GUIDANCE_PROMPT},
+            messages=[{"role": "system", "content": f"{GUIDANCE_PROMPT}\nהתאריך היום: {today.isoformat()}"},
                       {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
         )
         guidance = _build(_parse_json(response.choices[0].message.content), answers, picture, fallback)

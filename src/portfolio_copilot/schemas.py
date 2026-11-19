@@ -1,3 +1,4 @@
+from datetime import date
 from typing import Literal, Optional, List
 from pydantic import BaseModel, Field, ValidationError
  
@@ -190,11 +191,28 @@ def _field_list(value):
     return list(dict.fromkeys(x.strip() for x in value if x.strip())), None
 
 
-def apply_profile_update(current: InvestorProfile, patch: dict) -> tuple[InvestorProfile, dict, dict]:
+def horizon_from_target_year(value, today: date) -> tuple[int | None, str | None]:
+    """שנת יעד -> אופק בשנים, מחושב בקוד מול התאריך של היום. מחזיר (אופק, None) או (None, סיבת דחייה)."""
+    year, reason = _number(value, integer=True)
+    if reason:
+        return None, reason
+    horizon = year - today.year
+    if horizon < 1:
+        return None, f"שנת היעד {year} לא בעתיד (השנה {today.year}). צריך שנה מ-{today.year + 1} והלאה"
+    if horizon > 80:
+        return None, f"שנת היעד {year} רחוקה מדי: אופק של {horizon} שנים, והמקסימום 80"
+    return horizon, None
+
+
+def apply_profile_update(current: InvestorProfile, patch: dict,
+                         today: date | None = None) -> tuple[InvestorProfile, dict, dict]:
     """מעדכן פרופיל מערכים שהמודל חילץ, אחרי בדיקה בקוד של כל שדה בנפרד.
 
     מחזיר (פרופיל חדש, מה התקבל, מה נדחה וסיבה). ערך null מדולג. שדה לא מוכר נדחה.
     שינוי רמת סיכון מאפס את האישור, ואישור סיכון נדחה כשאין רמת סיכון.
+
+    target_year: שנת יעד. הקוד מחשב investment_horizon_years = target_year - השנה של today
+    (ברירת מחדל: date.today()). target_year עצמו לא נשמר בפרופיל.
 
     unknown_fields: שדות שהמשתמש אמר שהוא לא יודע. הערך נשאר ריק והשדה לא נשאל שוב.
     none_fields: שדות שהמשתמש אמר שאין לו. הקוד רושם 0 לסכום, ו"אין יעד מוגדר" ליעד.
@@ -229,6 +247,16 @@ def apply_profile_update(current: InvestorProfile, patch: dict) -> tuple[Investo
             items = [str(x).strip() for x in items if str(x).strip()]
             data[key] = list(dict.fromkeys([*data[key], *items]))
             accepted[key] = data[key]
+            continue
+        if key == "target_year":
+            ref = today or date.today()
+            horizon, reason = horizon_from_target_year(value, ref)
+            if reason:
+                rejected[key] = reason
+                continue
+            data["investment_horizon_years"] = horizon
+            accepted[key] = ref.year + horizon
+            accepted["investment_horizon_years"] = horizon
             continue
         validator = PROFILE_VALIDATORS.get(key)
         if validator is None:

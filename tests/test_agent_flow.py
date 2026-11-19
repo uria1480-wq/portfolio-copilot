@@ -80,20 +80,26 @@ def test_bad_json_keeps_profile(monkeypatch):
 def test_system_message_includes_today(monkeypatch):
     import datetime
 
-    class FakeDate(datetime.date):
-        @classmethod
-        def today(cls):
-            return cls(2031, 2, 3)
-
-    monkeypatch.setattr(agent, "datetime", SimpleNamespace(date=FakeDate))
     fake = FakeClient([Msg(content=FINAL)])
     monkeypatch.setattr(agent, "client", fake)
     s, uid = store_with_holding()
-    agent.chat_step([{"role": "user", "content": "אני רוצה דירה ב-2040"}], InvestorProfile(), s, uid)
+    agent.chat_step([{"role": "user", "content": "אני רוצה דירה ב-2040"}], InvestorProfile(), s, uid,
+                    today=datetime.date(2031, 2, 3))
     system = [m["content"] for m in fake.calls[0]["messages"] if m["role"] == "system"]
-    expected = ("התאריך היום: 2031-02-03. השתמש בו לכל חישוב של כמה שנים נשארו עד שנה עתידית, "
-                "ואל תניח שהשנה היא שנת האימון שלך.")
-    assert any(expected in content for content in system)
+    assert any("התאריך היום: 2031-02-03" in content for content in system)
+
+
+def test_target_year_horizon_uses_injected_date(monkeypatch):
+    import datetime
+    import json
+
+    fake = FakeClient([Msg(tool_calls=[Call("c1", "update_profile", json.dumps({"target_year": 2029}))]),
+                       Msg(content=FINAL)])
+    monkeypatch.setattr(agent, "client", fake)
+    s, uid = store_with_holding()
+    _, profile = agent.chat_step([{"role": "user", "content": "דירה ב-2029"}], InvestorProfile(), s, uid,
+                                 today=datetime.date(2026, 11, 19))
+    assert profile.investment_horizon_years == 3
 
 
 def test_endless_tool_calls_terminate(monkeypatch):

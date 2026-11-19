@@ -149,17 +149,19 @@ def repair_to_json(raw: str, history: list[dict]) -> dict | None:
 
 
 def chat_step(messages_history: list[dict], current_profile: InvestorProfile,
-              store=None, user_id: int | None = None, fetch=None, kb=None) -> tuple[str, InvestorProfile]:
+              store=None, user_id: int | None = None, fetch=None, kb=None,
+              today: datetime.date | None = None) -> tuple[str, InvestorProfile]:
     """מריץ תור שיחה. אם יש store ו-user_id, הסוכן יכול להפעיל כלים.
 
     כלי פרופיל (update_profile, add_restriction) מעדכנים את הפרופיל כבר בתוך הלולאה: כלים שרצים
     אחריהם באותו תור רואים את הפרופיל החדש, והוא נשמר מיד ב-store.
+    today: התאריך שנכנס להקשר ולחישוב אופק משנת יעד (ברירת מחדל: date.today()).
     """
     def profile_message(profile: InvestorProfile) -> dict:
         return {"role": "system", "content": f"פרופיל נוכחי שנאסף עד כה:\n{profile.model_dump_json()}"}
 
-    today_line = (f"התאריך היום: {datetime.date.today().isoformat()}. השתמש בו לכל חישוב של כמה שנים נשארו "
-                  "עד שנה עתידית, ואל תניח שהשנה היא שנת האימון שלך.")
+    today = today or datetime.date.today()
+    today_line = f"התאריך היום: {today.isoformat()}"
     prompt_messages = [
         {"role": "system", "content": f"{SYSTEM_PROMPT}\n{today_line}"},
         profile_message(current_profile),
@@ -192,7 +194,7 @@ def chat_step(messages_history: list[dict], current_profile: InvestorProfile,
                     args = {}
                 if call.function.name in PROFILE_TOOLS:
                     result, new_profile = run_profile_tool(call.function.name, args, current_profile,
-                                                           store, user_id, fetch)
+                                                           store, user_id, fetch, today)
                     if new_profile != current_profile:
                         current_profile = new_profile
                         prompt_messages[1] = profile_message(current_profile)

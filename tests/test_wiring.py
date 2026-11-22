@@ -38,3 +38,14 @@ def test_system_prompt_matches_current_app():
         assert gone not in prompt
     for screen in ("היכרות", "המצב שלי", "ניהול חודשי", "שאל את הסוכן", "get_proposal", "get_monthly_allocation"):
         assert screen in prompt
+
+
+def test_system_prompt_covers_failures_found_in_evals():
+    """הכללים שנוספו אחרי סט ההערכה (evals/README.md): מכירה, מחוץ לתחום, אחוז מהנטו, "למה", תשובה לא ברורה."""
+    prompt = agent.SYSTEM_PROMPT
+    assert "בקשה למכור" in prompt and "אל תקרא ל-add_restriction" in prompt
+    assert "מחוץ לתחום" in prompt and "אל תציע הקצאה" in prompt
+    assert "אל תחשב את האחוז בעצמך" in prompt and "ניהול חודשי" in prompt
+    assert 'חובה לקרוא לו גם לשאלות "למה"' in prompt
+    assert "תשובה לא ברורה" in prompt and "שאל שוב" in prompt
+

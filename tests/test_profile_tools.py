@@ -50,11 +50,11 @@ def test_invalid_values_are_rejected_with_reason_and_old_value_kept():
     start = InvestorProfile(age=30)
     p, accepted, rejected = apply_profile_update(start, {
         "age": 150, "investment_horizon_years": 0, "monthly_deposit": -5, "recommended_risk_level": "בינוני",
-        "max_single_asset_weight": 0.01, "life_stage": "חייזר", "favorite_color": "כחול", "needs_cashflow": "כן",
+        "life_stage": "חייזר", "favorite_color": "כחול", "needs_cashflow": "כן",
     })
     assert accepted == {}
     assert set(rejected) == {"age", "investment_horizon_years", "monthly_deposit", "recommended_risk_level",
-                             "max_single_asset_weight", "life_stage", "favorite_color", "needs_cashflow"}
+                             "life_stage", "favorite_color", "needs_cashflow"}
     assert all(isinstance(r, str) and r for r in rejected.values())
     assert p == start
 
@@ -299,9 +299,11 @@ def test_add_restriction_accepts_hebrew_asset_class():
     assert p.no_buy_symbols == ['אג"ח קונצרני'] and 'לא לקנות: אג"ח קונצרני' in p.restrictions
 
 
-def test_old_saved_profile_with_no_sell_field_still_loads():
-    p = InvestorProfile.model_validate_json('{"age": 40, "no_sell_symbols": ["ZIM"], "restrictions": ["לא למכור: ZIM"]}')
-    assert p.age == 40 and p.no_buy_symbols == [] and p.restrictions == ["לא למכור: ZIM"]
+def test_old_saved_profile_with_removed_fields_still_loads():
+    p = InvestorProfile.model_validate_json('{"age": 40, "no_sell_symbols": ["ZIM"], "restrictions": ["לא למכור: ZIM"], '
+                                            '"max_single_asset_weight": 0.2}')
+    assert p.age == 40 and p.no_buy_symbols == [] and p.restrictions == []  # "לא למכור" ישן נמחק
+    assert "max_single_asset_weight" not in p.model_dump()
 
 
 def test_profile_tools_are_exposed_to_model():

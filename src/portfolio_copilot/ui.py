@@ -2,7 +2,7 @@
 import html
 import inspect
 
-from portfolio_copilot.proposal import MONEY_MARKET, MonthlyReport, Proposal, history_row
+from portfolio_copilot.proposal import MonthlyReport, Proposal, history_row
 from portfolio_copilot.schemas import InvestorProfile
 
 
@@ -118,7 +118,7 @@ def hero_html() -> str:
     return (
         '<div class="pc-hero"><div>'
         "<h1>Portfolio Copilot</h1>"
-        "<p>סוכן פיננסי אישי שמכיר אותך, קורא את המסמכים שלך ומחשב את ההצעה בקוד</p>"
+        "<p>סוכן השקעות אישי: ראיון, תמונת מצב, הצעה וניהול חודשי</p>"
         "</div>"
         '<span class="pc-chip">פרויקט אקדמי · לא ייעוץ השקעות או פנסיה מורשה</span></div>'
     )
@@ -189,8 +189,6 @@ def profile_html(profile: InvestorProfile) -> str:
 
     horizon_html = (_value(f"{profile.investment_horizon_years} שנים")
                     if profile.investment_horizon_years else _value("—", muted=True))
-    cap = profile.max_single_asset_weight or 0.20
-    cap_html = _value(f"{cap * 100:.0f}% לנכס בודד")
 
     vehicles = _chips(profile.relevant_vehicles) if profile.relevant_vehicles else _value("—", muted=True)
     restrictions = (_chips(profile.restrictions, "pc-chip-wait") if profile.restrictions
@@ -208,7 +206,6 @@ def profile_html(profile: InvestorProfile) -> str:
         + _field("רמת סיכון", risk_html)
         + _field("אופק השקעה", horizon_html)
         + _field("אופי התיק", cash_html)
-        + _field("תקרת פיזור", cap_html)
         + _field("מכשירים רלוונטיים", vehicles, full=True)
         + _field("מגבלות שלי", restrictions, full=True)
         + "</div>" + reasoning + "</div>"
@@ -281,16 +278,6 @@ def intake_progress_html(profile: InvestorProfile) -> str:
         if key != "spouse_monthly_net_income" or profile.spouse_income_required())
     return head + ('<div class="pc-card"><div class="pc-card-head"><h3>התקדמות ההיכרות</h3>' + status + "</div>"
                    f'<div class="pc-chips">{chips}</div></div>')
-
-
-def intake_result_html(level: str, reasons: list[str], prefix: str = "") -> str:
-    head = banner_html(prefix)
-    cls = RISK_CLASS.get(level, "pc-chip-idle")
-    items = "".join(f"<li>{esc(r)}</li>" for r in reasons)
-    return head + ('<div class="pc-card"><div class="pc-card-head"><h3>מה עולה מהראיון</h3>'
-                   f'<span class="pc-chip {cls}">רמת סיכון מוצעת: {esc(level)}</span></div>'
-                   f'<ul style="margin:0;padding-right:20px;line-height:1.8">{items}</ul>'
-                   '<div class="pc-empty">זו הצעה. בשלב הניתוח תאשר או תשנה אותה.</div></div>')
 
 
 def situation_html(view: dict, prefix: str = "") -> str:
@@ -388,7 +375,7 @@ def monthly_report_html(r: MonthlyReport) -> str:
     a = r.allocation
     rows = []
     if a.emergency_amount:
-        rows.append(f'<tr><td>קרן חירום ({esc(MONEY_MARKET)})</td><td>{_money(a.emergency_amount)}</td></tr>')
+        rows.append(f'<tr><td>קרן חירום ({esc(a.emergency_asset_class)})</td><td>{_money(a.emergency_amount)}</td></tr>')
     rows += [f'<tr><td>{esc(line.asset_class)}</td><td>{_money(line.amount)}</td></tr>'
              for line in (a.lines or []) if line.amount]
     if a.unallocated:

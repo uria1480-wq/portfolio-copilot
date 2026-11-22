@@ -44,6 +44,17 @@ CORP_BONDS = 'אג"ח קונצרני'
 MONEY_MARKET = "כספית"
 ASSET_CLASSES = (US_EQUITY, WORLD_EQUITY, GOV_BONDS, CORP_BONDS, MONEY_MARKET)
 
+# חוק 6: "אל תקנה X" על סוג נכס. החלק שלו עובר לתחליף המותר הראשון ברשימה:
+# קודם הסוג הקרוב באותה קבוצה, ואם כל הקבוצה אסורה, לכספית. כספית אסורה עוברת לאג"ח ממשלתי.
+SUBSTITUTES = {
+    US_EQUITY: (WORLD_EQUITY, MONEY_MARKET, GOV_BONDS, CORP_BONDS),
+    WORLD_EQUITY: (US_EQUITY, MONEY_MARKET, GOV_BONDS, CORP_BONDS),
+    GOV_BONDS: (CORP_BONDS, MONEY_MARKET),
+    CORP_BONDS: (GOV_BONDS, MONEY_MARKET),
+    MONEY_MARKET: (GOV_BONDS, CORP_BONDS),
+}
+EQUITY_CLASSES = (US_EQUITY, WORLD_EQUITY)
+
 # חוק 7: פנסיה והשתלמות
 PENSION_ALL_EQUITY_UNDER_AGE = 40
 PENSION_ALL_EQUITY_LABEL = "100% מנייתי"
@@ -137,10 +148,92 @@ def allocation_percents(equity_pct: float, horizon_years: int) -> dict[str, floa
 
 
 def _split(amount: float, pct: dict[str, float]) -> dict[str, float]:
-    """מחלק סכום לפי האחוזים. תיקון העיגול נכנס לכספית, כך שהסכום שווה בדיוק."""
+    """מחלק סכום לפי האחוזים. תיקון העיגול נכנס לכספית (או לסוג הגדול ביותר, אם לכספית 0%),
+    כך שהסכום שווה בדיוק."""
     parts = {k: round(amount * p / 100, 2) for k, p in pct.items()}
-    parts[MONEY_MARKET] = round(parts[MONEY_MARKET] + amount - sum(parts.values()), 2)
+    fix = MONEY_MARKET if pct.get(MONEY_MARKET) else max(pct, key=pct.get)
+    parts[fix] = round(parts[fix] + amount - sum(parts.values()), 2)
     return parts
+
+
+# ניסוחים נפוצים לכל סוג נכס (אחרי נרמול: מירכאות ישרות, רווח אחד, אותיות לטיניות גדולות)
+ASSET_CLASS_ALIASES = {
+    US_EQUITY: ('מניות ארה"ב', 'מדד ארה"ב', 'מדד אמריקאי', "מניות אמריקאיות", "S&P 500", "S&P500", "SP500"),
+    WORLD_EQUITY: ("מניות עולמיות", "מדד עולמי", "מניות עולם", "MSCI WORLD", "ACWI"),
+    GOV_BONDS: ('אג"ח ממשלתיות', "אגרות חוב ממשלתיות", 'אג"ח מדינה', "ממשלתי", "ממשלתיות"),
+    CORP_BONDS: ('אג"ח קונצרניות', "אגרות חוב קונצרניות", 'אג"ח חברות', "קונצרני", "קונצרניות"),
+    MONEY_MARKET: ("קרן כספית", "קרנות כספיות", "כספיות"),
+}
+
+
+def _normalize_name(text: str) -> str:
+    return " ".join(str(text).replace("״", '"').replace("“", '"').replace("”", '"').upper().split())
+
+
+_ASSET_CLASS_LOOKUP = {_normalize_name(name): k for k, names in ASSET_CLASS_ALIASES.items() for name in (k, *names)}
+
+
+def asset_class_of(item: str) -> str | None:
+    """אם item הוא אחד מחמשת סוגי הנכסים או ניסוח מוכר שלו (ASSET_CLASS_ALIASES), מחזיר את השם הקנוני.
+    בלי תלות ברווחים, בסוג המירכאות ובאותיות גדולות/קטנות. אחרת None."""
+    return _ASSET_CLASS_LOOKUP.get(_normalize_name(item))
+
+
+# הגבלה על קבוצה שלמה: "מניות" חוסם את שני מדדי המניות, "אג"ח" את שני סוגי האג"ח
+EQUITY_GROUP = "מניות"
+BOND_GROUP = 'אג"ח'
+ASSET_GROUPS = {EQUITY_GROUP: EQUITY_CLASSES, BOND_GROUP: (GOV_BONDS, CORP_BONDS)}
+GROUP_ALIASES = {
+    EQUITY_GROUP: ("כל המניות", "שוק המניות", "מדדי מניות"),
+    BOND_GROUP: ("אגח", "אגרות חוב", 'כל האג"ח'),
+}
+_GROUP_LOOKUP = {_normalize_name(name): g for g, names in GROUP_ALIASES.items() for name in (g, *names)}
+
+
+def restriction_target(item: str) -> str | None:
+    """השם הקנוני של מה ש-item חוסם: סוג נכס (ASSET_CLASSES) או קבוצה (ASSET_GROUPS). None לסמל ספציפי."""
+    return asset_class_of(item) or _GROUP_LOOKUP.get(_normalize_name(item))
+
+
+def classes_blocked_by(item: str) -> tuple[str, ...]:
+    """סוגי הנכסים ש-item חוסם: אחד, שניים (קבוצה), או אף אחד (סמל ספציפי כמו TSLA)."""
+    target = restriction_target(item)
+    return ASSET_GROUPS.get(target, (target,)) if target else ()
+
+
+def blocked_classes(profile: InvestorProfile) -> list[str]:
+    """סוגי הנכסים שהמשתמש אמר שלא יקנה, בסדר ASSET_CLASSES. סמלים ספציפיים (כמו TSLA) לא נכללים."""
+    blocked = {k for item in profile.no_buy_symbols for k in classes_blocked_by(item)}
+    return [k for k in ASSET_CLASSES if k in blocked]
+
+
+def substitute_for(asset_class: str, blocked: list[str]) -> str | None:
+    """התחליף המותר הראשון לסוג נכס אסור, או None אם כל התחליפים אסורים."""
+    return next((s for s in SUBSTITUTES[asset_class] if s not in blocked), None)
+
+
+def apply_restrictions(pct: dict[str, float], blocked: list[str]) -> tuple[dict[str, float], list[str]]:
+    """חוק 6: מעביר את האחוז של כל סוג נכס אסור לתחליף שלו. סכום האחוזים לא משתנה.
+    מחזיר (אחוזים חדשים, הסברים). סוג נכס בלי תחליף מותר נשאר במקומו, עם הסבר."""
+    pct, reasons = dict(pct), []
+    for k in blocked:
+        share = pct[k]
+        target = substitute_for(k, blocked)
+        if target is None:
+            reasons.append(f"ביקשת לא לקנות {k}, אבל כל החלופות שלו אסורות גם הן, ולכן {share:g}% נשארו בו.")
+            continue
+        pct[target] = round(pct[target] + share, 2)
+        pct[k] = 0.0
+        if share:
+            reasons.append(f"ביקשת לא לקנות {k}, ולכן ה-{share:g}% שלו עברו ל{target}.")
+    return pct, reasons
+
+
+def emergency_asset_class(blocked: list[str]) -> str:
+    """לאן הולכת השלמת קרן החירום: כספית, ואם היא אסורה, התחליף שלה. אם אין תחליף מותר, נשארים בכספית."""
+    if MONEY_MARKET not in blocked:
+        return MONEY_MARKET
+    return substitute_for(MONEY_MARKET, blocked) or MONEY_MARKET
 
 
 def pension_track(age: int, equity_pct: float) -> str:
@@ -185,7 +278,8 @@ def _required_ok(profile: InvestorProfile, need, missing: list[str]) -> bool:
 
 
 def _mix(profile: InvestorProfile, reasons: list[str]) -> tuple[float, float, dict[str, float]]:
-    """חוקים 3-5: (אחוז מניות אחרי תקרת גיל, אחוז מניות מהטבלה, אחוז לכל מחלקה). מוסיף הסברים."""
+    """חוקים 3-6: (אחוז מניות בתמהיל הסופי, אחוז מניות מהטבלה, אחוז לכל מחלקה). מוסיף הסברים.
+    הגבלות "אל תקנה" על סוג נכס מוחלות כאן, ולכן גם ההצעה וגם החלוקה החודשית מכבדות אותן."""
     eq, table_pct, bucket = equity_percent(profile.recommended_risk_level, profile.investment_horizon_years,
                                            profile.age)
     reasons.append(f"מניות: {table_pct:.0f}% לפי רמת סיכון {profile.recommended_risk_level} "
@@ -197,7 +291,9 @@ def _mix(profile: InvestorProfile, reasons: list[str]) -> tuple[float, float, di
     bonds_share = BONDS_SHARE_SHORT if profile.investment_horizon_years <= SHORT_HORIZON_YEARS else BONDS_SHARE_LONG
     reasons.append(f'שאר {100 - eq:g}%: אג"ח {bonds_share:.0%} (חצי ממשלתי, חצי קונצרני) וכספית '
                    f'{1 - bonds_share:.0%}. המניות מתחלקות שווה בין ארה"ב לעולם.')
-    return eq, table_pct, pct
+    pct, moved = apply_restrictions(pct, blocked_classes(profile))
+    reasons.extend(moved)
+    return round(sum(pct[k] for k in EQUITY_CLASSES), 2), table_pct, pct
 
 
 def build_proposal(profile: InvestorProfile, today: date | None = None) -> Proposal:
@@ -219,7 +315,8 @@ def build_proposal(profile: InvestorProfile, today: date | None = None) -> Propo
             safety.current_months = round(profile.liquid_savings / profile.monthly_expenses, 1)
         reasons.append(_emergency_reason(profile, months, target_amount))
         if shortfall > 0:
-            safety.steps.append(f"להשלים קרן חירום: חסרים {_money(shortfall)}. ההפקדות הראשונות הולכות לכספית.")
+            safety.steps.append(f"להשלים קרן חירום: חסרים {_money(shortfall)}. ההפקדות הראשונות הולכות ל"
+                                f"{emergency_asset_class(blocked_classes(profile))}.")
             if need("monthly_deposit") and profile.monthly_deposit > 0:
                 safety.months_to_fill = math.ceil(shortfall / profile.monthly_deposit)
                 reasons.append(f"השלמת קרן החירום: {_money(shortfall)} / {_money(profile.monthly_deposit)} בחודש = "
@@ -292,7 +389,8 @@ class MonthlyLine(BaseModel):
 class MonthlyAllocation(BaseModel):
     as_of: date
     deposit: float
-    emergency_amount: float = 0.0          # לכספית, להשלמת קרן החירום
+    emergency_amount: float = 0.0          # להשלמת קרן החירום
+    emergency_asset_class: str = MONEY_MARKET  # לאן הולכת השלמת הקרן: כספית, או התחליף שלה אם היא אסורה
     lines: list[MonthlyLine] | None = None  # השאר לפי התמהיל. None = לא חושב (חסרים נתונים)
     unallocated: float = 0.0                # מה שלא חולק כי חסר תמהיל
     missing: list[str] = Field(default_factory=list)
@@ -308,7 +406,8 @@ def emergency_deposited(history: list[dict]) -> float:
 
 def allocate_monthly(profile: InvestorProfile, deposit: float, today: date | None = None,
                      already_in_emergency: float = 0.0) -> MonthlyAllocation:
-    """מחלק הפקדה חודשית: קודם משלימים חוסר בקרן החירום (לכספית), והשאר לפי התמהיל של build_proposal.
+    """מחלק הפקדה חודשית: קודם משלימים חוסר בקרן החירום (לכספית, או לתחליף שלה אם היא אסורה),
+    והשאר לפי התמהיל של build_proposal.
     החוסר = יעד פחות הנזיל בפרופיל פחות מה שכבר הופנה לקרן בדיווחים קודמים (already_in_emergency), ולא פחות מ-0.
     הסכומים מעוגלים כך שהסכום הכולל שווה בדיוק להפקדה. אין מכירות."""
     today = today or date.today()
@@ -321,6 +420,7 @@ def allocate_monthly(profile: InvestorProfile, deposit: float, today: date | Non
     need = _needs(profile, missing)
 
     emergency = 0.0
+    emergency_class = emergency_asset_class(blocked_classes(profile))
     if need("monthly_expenses", "liquid_savings"):
         months, target, profile_shortfall = _emergency(profile)
         reasons.append(_emergency_reason(profile, months, target))
@@ -330,7 +430,7 @@ def allocate_monthly(profile: InvestorProfile, deposit: float, today: date | Non
                            f"ולכן החוסר שנשאר הוא {_money(shortfall)}.")
         emergency = round(min(shortfall, deposit), 2)
         if emergency:
-            reasons.append(f"חסרים {_money(shortfall)} בקרן החירום, ולכן {_money(emergency)} מההפקדה הולכים קודם לכספית.")
+            reasons.append(f"חסרים {_money(shortfall)} בקרן החירום, ולכן {_money(emergency)} מההפקדה הולכים קודם ל{emergency_class}.")
         else:
             reasons.append("קרן החירום מלאה, ולכן כל ההפקדה מתחלקת לפי התמהיל.")
     else:
@@ -349,7 +449,8 @@ def allocate_monthly(profile: InvestorProfile, deposit: float, today: date | Non
         reasons.append(f"{_money(rest)} מתחלקים לפי התמהיל.")
     else:
         lines = []
-    return MonthlyAllocation(as_of=today, deposit=deposit, emergency_amount=emergency, lines=lines,
+    return MonthlyAllocation(as_of=today, deposit=deposit, emergency_amount=emergency,
+                             emergency_asset_class=emergency_class, lines=lines,
                              unallocated=unallocated, missing=missing, reasons=reasons)
 
 

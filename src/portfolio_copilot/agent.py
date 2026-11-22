@@ -6,6 +6,7 @@ import time
 from dotenv import load_dotenv
 from openai import OpenAI
 from portfolio_copilot.schemas import InvestorProfile
+from portfolio_copilot.documents import read_document
 from portfolio_copilot.agent_tools import PROFILE_TOOLS, run_profile_tool, run_tool, tool_specs
 
 load_dotenv()
@@ -19,6 +20,11 @@ client = OpenAI(
 
 MODEL_NAME = os.getenv("MODEL_NAME") or "models/gemini-3.5-flash-lite"
 MAX_TOOL_ROUNDS = 4
+
+
+def read_payslip(path: str) -> dict:
+    """קורא תלוש שכר (PDF) ומחזיר את מה שחולץ ונבדק בקוד. ה-client ושם המודל נשארים בתוך המודול הזה."""
+    return read_document(path, client, MODEL_NAME)
 
 SYSTEM_PROMPT = """אתה Portfolio Copilot – מתכנן ומאפיין פיננסי אישי, בפרויקט אקדמי בקורס מבוא לבינה מלאכותית.
 אתה לא יועץ השקעות או פנסיה מורשה, ואתה לא מציג את עצמך ככזה. מותר להזכיר זאת בקצרה כשמתאים.
@@ -42,7 +48,7 @@ SYSTEM_PROMPT = """אתה Portfolio Copilot – מתכנן ומאפיין פינ
 2. תהיה פרואקטיבי: אם המשתמש משתף גיל ומצב, הצע רמת סיכון מנומקת (שמרני / מאוזן / אגרסיבי) ומכשירים מתאימים.
 3. רמת הסיכון היא הצעה בלבד. אחרי שהצעת אותה, שאל את המשתמש אם היא מתאימה לו.
    risk_confirmed=true רק אם המשתמש אישר במפורש בהודעה האחרונה, או שבחר בעצמו רמת סיכון אחרת.
-4. אם המשתמש אומר שהוא לא רוצה לקנות משהו (מניה, קרן או סוג נכס), קרא ל-add_restriction. אל תמחק מגבלות קיימות.
+4. אם המשתמש אומר שהוא לא רוצה לקנות משהו (מניה, קרן או סוג נכס), קרא ל-add_restriction. אל תמחק מגבלות קיימות, אלא אם המשתמש ביקש במפורש לבטל אחת (remove_restriction).
 5. אל תמציא מספרים שהמשתמש לא נתן.
 6. אתה רק מציע. אתה לא קונה ולא מבצע שום פעולה, ואין הצעות מכירה.
 
@@ -55,8 +61,11 @@ SYSTEM_PROMPT = """אתה Portfolio Copilot – מתכנן ומאפיין פינ
 
 כלים שעומדים לרשותך:
 - update_profile: שמירת פרטי פרופיל, עם בדיקה בקוד. מחזיר accepted, rejected, missing, next_field ו-complete.
-- add_restriction: שמירת משהו שהמשתמש לא רוצה לקנות. נרשם במגבלות שבפרופיל. ההצעה בנויה מסוגי נכסים ולא מחושבת
-  מחדש בעקבות המגבלה, אז אל תטען שהחישוב השתנה.
+- add_restriction: שמירת משהו שהמשתמש לא רוצה לקנות. לסוג נכס שלח את השם המדויק מתיאור הכלי.
+  אם affects_proposal=true, אמור שהחלק של סוג הנכס יעבור לסוג קרוב בהצעה ובחלוקה החודשית, והצע להציג את ההצעה
+  המעודכנת (get_proposal). אם affects_proposal=false (מניה, קרן או סמל ספציפי), אמור במפורש שההצעה היא לפי
+  סוגי נכסים ולכן ההגבלה לא משנה אותה, ושהיא נשמרה בפרופיל.
+- remove_restriction: ביטול הגבלה ששמורה בפרופיל, רק כשהמשתמש ביקש במפורש. שלח את השם כפי שהוא ב-no_buy_symbols.
 - get_proposal: ההצעה שהקוד בונה מהפרופיל: קרן חירום וחובות, תמהיל בסוגי נכסים ומסלול לפנסיה ולהשתלמות, עם נימוקים
   ומה חסר. קרא לו כשהמשתמש שואל מה כדאי לו, על התמהיל, על קרן החירום או על מסלול הפנסיה וההשתלמות.
 - get_monthly_allocation: איך מתחלק סכום להשקעה החודש: קודם השלמת קרן החירום לכספית, והשאר לפי התמהיל.
@@ -72,7 +81,7 @@ SYSTEM_PROMPT = """אתה Portfolio Copilot – מתכנן ומאפיין פינ
 
 פורמט התשובה:
 - ענה למשתמש בטקסט רגיל בעברית, בלי JSON.
-- הפרופיל מתעדכן אך ורק דרך הכלים update_profile ו-add_restriction. מה שלא נשמר דרכם לא נשמר בכלל.
+- הפרופיל מתעדכן אך ורק דרך הכלים update_profile, add_restriction ו-remove_restriction. מה שלא נשמר דרכם לא נשמר בכלל.
 """
 
 
@@ -120,32 +129,6 @@ def final_reply_text(raw: str | None) -> str:
         print("[agent] התשובה נראית כמו JSON בלי reply. תשובת המודל:\n", text[:1200])
         return FALLBACK_REPLY
     return text
-
-
-REPAIR_PROMPT = """קיבלת את ההודעה האחרונה של משתמש ואת תשובת סוכן פיננסי שלא הגיעה כ-JSON תקין.
-החזר אך ורק אובייקט JSON תקין אחד במבנה {"reply": "...", "profile": {...}}.
-שמור ב-reply את תשובת הסוכן כמו שהיא, בלי לשנות.
-ב-profile מלא רק שדות שהמשתמש אמר במפורש בהודעה האחרונה (age, life_stage, initial_amount, monthly_deposit,
-needs_cashflow, investment_goal, investment_horizon_years, restrictions), וגם recommended_risk_level אם הסוכן הציע.
-אל תמציא. שדה לא ידוע הוא null. risk_confirmed הוא false אלא אם המשתמש אישר במפורש."""
-
-
-def repair_to_json(raw: str, history: list[dict]) -> dict | None:
-    """קריאה שנייה וקצרה שממירה תשובה שבורה (או טקסט חופשי) ל-JSON תקין. מנסים פעם אחת בלבד."""
-    last_user = next((m["content"] for m in reversed(history) if m.get("role") == "user"), "")
-    try:
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            temperature=0,
-            messages=[
-                {"role": "system", "content": REPAIR_PROMPT},
-                {"role": "user", "content": json.dumps({"last_user_message": last_user, "agent_text": raw}, ensure_ascii=False)},
-            ],
-        )
-        data = extract_json(response.choices[0].message.content or "")
-        return data if isinstance(data, dict) and "reply" in data else None
-    except Exception:
-        return None
 
 
 def chat_step(messages_history: list[dict], current_profile: InvestorProfile,

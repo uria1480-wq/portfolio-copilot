@@ -1,5 +1,5 @@
 from portfolio_copilot.schemas import InvestorProfile, merge_profile
-from portfolio_copilot.ui import banner_html, profile_html, supported
+from portfolio_copilot.ui import banner_html, hero_html, profile_html, supported
 
 
 def test_profile_states():
@@ -28,3 +28,7 @@ def test_supported_filters_unknown_params():
     def f(a, b=1): ...
     assert supported(f, a=1, c=2) == {"a": 1}
 
+
+def test_hero_describes_current_flow_without_documents():
+    out = hero_html()
+    assert "ראיון, תמונת מצב, הצעה וניהול חודשי" in out and "מסמכים" not in out

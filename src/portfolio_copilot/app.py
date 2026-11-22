@@ -3,9 +3,8 @@ import inspect
 
 import gradio as gr
 
-from portfolio_copilot.agent import chat_step, client, MODEL_NAME
+from portfolio_copilot.agent import chat_step, read_payslip
 from portfolio_copilot.db import ALL_HISTORY, Store
-from portfolio_copilot.documents import read_document
 from portfolio_copilot.proposal import (build_proposal, default_savings_percent, emergency_deposited, monthly_report,
                                         partner_fields_shown)
 from portfolio_copilot.schemas import InvestorProfile
@@ -142,7 +141,7 @@ def make_monthly_handler(store: Store, user_id: int):
 def _read_payslip(store: Store, user_id: int, file):
     """קורא תלוש בקוד הקיים ושומר אותו. מחזיר (summary, None) או (None, הודעת שגיאה)."""
     try:
-        doc = read_document(getattr(file, "name", file), client, MODEL_NAME)
+        doc = read_payslip(getattr(file, "name", file))
     except Exception as e:
         return None, banner_html(f"❌ {e}")
     store.save_document(user_id, doc)

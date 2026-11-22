@@ -14,7 +14,7 @@ names = lambda specs: {t["function"]["name"] for t in specs}
 
 
 def test_agent_sees_only_profile_proposal_and_monthly_tools():
-    assert names(tool_specs()) == {"update_profile", "add_restriction", "get_proposal", "get_monthly_allocation"}
+    assert names(tool_specs()) == {"update_profile", "add_restriction", "remove_restriction", "get_proposal", "get_monthly_allocation"}
 
 
 def test_chat_step_offers_the_tools(monkeypatch):

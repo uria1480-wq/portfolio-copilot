@@ -220,15 +220,15 @@ def test_payslip_upload_fills_fields(monkeypatch):
     store, uid = new_store()
     doc = {"doc_type": "payslip", "period": "2026-10", "data": {}, "warnings": [],
            "summary": {"net_to_bank": 17200.0, "pension_monthly_total": 2100.0, "study_fund_monthly_total": 900.0}}
-    monkeypatch.setattr(appmod, "read_document", lambda path, client, model: doc)
+    monkeypatch.setattr(appmod, "read_payslip", lambda path: doc)
     net, pension, study, status = appmod.make_payslip_handler(store, uid)("slip.pdf")
     assert (net, pension, study) == (17200.0, 2100.0, 900.0) and "התלוש נקרא" in status
     assert store.conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 1
 
-    def not_a_payslip(path, client, model):
+    def not_a_payslip(path):
         raise ValueError("כרגע אפשר לקרוא רק תלושי שכר.")
 
-    monkeypatch.setattr(appmod, "read_document", not_a_payslip)
+    monkeypatch.setattr(appmod, "read_payslip", not_a_payslip)
     *_, status = appmod.make_payslip_handler(store, uid)("report.pdf")
     assert "רק תלושי שכר" in status and store.conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 1
 
@@ -331,14 +331,14 @@ def test_partner_payslip_fills_partner_net_and_rejects_non_payslip(monkeypatch):
     store, uid = new_store()
     slip = {"doc_type": "payslip", "period": "2026-10", "data": {}, "warnings": [],
             "summary": {"net_to_bank": 15500.0, "pension_monthly_total": 1900.0, "study_fund_monthly_total": 700.0}}
-    monkeypatch.setattr(appmod, "read_document", lambda path, client, model: slip)
+    monkeypatch.setattr(appmod, "read_payslip", lambda path: slip)
     net, pension, study, status = appmod.make_partner_payslip_handler(store, uid)("partner.pdf")
     assert (net, pension, study) == (15500.0, 1900.0, 700.0) and "בן/בת הזוג נקרא" in status
 
-    def not_a_payslip(path, client, model):
+    def not_a_payslip(path):
         raise ValueError("כרגע אפשר לקרוא רק תלושי שכר.")
 
-    monkeypatch.setattr(appmod, "read_document", not_a_payslip)
+    monkeypatch.setattr(appmod, "read_payslip", not_a_payslip)
     *_, status = appmod.make_partner_payslip_handler(store, uid)("report.pdf")
     assert "רק תלושי שכר" in status
 
@@ -449,3 +449,17 @@ def test_report_button_refreshes_dashboard():
                      if d.get("trigger_after") == demo.config["dependencies"].index(chain[0])]
     labels = {by_id[o].__class__.__name__ for d in refresh_steps for o in d["outputs"]}
     assert refresh_steps and labels == {"HTML"}
+
+
+def test_app_does_not_see_llm_client_or_model_name():
+    """קריאות ל-LLM מוסתרות מאחורי ממשק בשמות של התחום (CLAUDE.md)."""
+    assert not hasattr(appmod, "client") and not hasattr(appmod, "MODEL_NAME")
+    assert not hasattr(appmod, "read_document")
+
+
+def test_read_payslip_passes_agent_client(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(agent, "read_document", lambda path, client, model: seen.update(
+        path=path, client=client, model=model) or {"ok": True})
+    assert agent.read_payslip("slip.pdf") == {"ok": True}
+    assert seen == {"path": "slip.pdf", "client": agent.client, "model": agent.MODEL_NAME}

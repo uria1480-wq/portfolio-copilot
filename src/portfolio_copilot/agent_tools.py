@@ -3,7 +3,8 @@
 from datetime import date
 
 from portfolio_copilot.db import ALL_HISTORY
-from portfolio_copilot.proposal import allocate_monthly, build_proposal, emergency_deposited
+from portfolio_copilot.proposal import (ASSET_CLASSES, ASSET_GROUPS, allocate_monthly, build_proposal, classes_blocked_by,
+                                        emergency_deposited, restriction_target)
 from portfolio_copilot.schemas import (EMPLOYMENT_OPTIONS, LIFE_STAGES, MARITAL_OPTIONS, NONE_ALLOWED, RISK_LEVELS,
                                        UNKNOWN_ALLOWED, InvestorProfile, apply_profile_update)
 
@@ -38,7 +39,6 @@ PROFILE_TOOL_SPECS = [
                     },
                     "recommended_risk_level": {"type": "string", "enum": list(RISK_LEVELS)},
                     "risk_confirmed": {"type": "boolean"},
-                    "max_single_asset_weight": {"type": "number", "description": "תקרת משקל לנכס בודד, 0.05 עד 1"},
                     "relevant_vehicles": {"type": "array", "items": {"type": "string"}},
                     "agent_reasoning": {"type": "string", "description": "נימוק קצר לרמת הסיכון"},
                     "marital_status": {"type": "string", "enum": list(MARITAL_OPTIONS)},
@@ -72,14 +72,34 @@ PROFILE_TOOL_SPECS = [
         "function": {
             "name": "add_restriction",
             "description": (
-                "שומר בפרופיל משהו שהמשתמש אמר שהוא לא רוצה לקנות: מניה, קרן או סוג נכס. "
-                "המגבלה נרשמת ומוצגת בפרופיל. ההצעה והחלוקה החודשית לא מחושבות מחדש בעקבותיה."
+                "שומר בפרופיל משהו שהמשתמש אמר שהוא לא רוצה לקנות. אם זה אחד מסוגי הנכסים "
+                f"({', '.join(ASSET_CLASSES)}) או קבוצה שלמה ({', '.join(ASSET_GROUPS)}), שלח את השם כך: "
+                "ההצעה והחלוקה החודשית יעבירו את החלק שלו לסוג קרוב (affects_proposal=true). "
+                "מניה, קרן או סמל ספציפי (למשל TSLA) נשמרים, "
+                "אבל לא משנים את ההצעה כי היא בסוגי נכסים (affects_proposal=false)."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "item": {"type": "string", "description": "מה לא לקנות, כפי שהמשתמש אמר. למשל TSLA או אג\"ח קונצרני"},
+                    "item": {"type": "string", "description": "מה לא לקנות: שם מדויק של סוג נכס (למשל אג\"ח קונצרני), או סמל/שם של מניה או קרן (למשל TSLA)"},
                     "kind": {"type": "string", "enum": ["no_buy"], "description": "סוג המגבלה"},
+                },
+                "required": ["item"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "remove_restriction",
+            "description": (
+                "מסיר מהפרופיל הגבלת \"אל תקנה\" ששמורה בו. קרא לו רק אם המשתמש ביקש במפורש לבטל את ההגבלה. "
+                "אם ההגבלה הייתה על סוג נכס, ההצעה והחלוקה החודשית חוזרות לתמהיל הרגיל עבורו."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "item": {"type": "string", "description": "ההגבלה להסרה, כפי שהיא מופיעה ב-no_buy_symbols בפרופיל"},
                 },
                 "required": ["item"],
             },
@@ -132,6 +152,20 @@ def tool_specs() -> list:
 MAX_RESTRICTION_LENGTH = 60
 
 
+def _restriction_item(args: dict) -> tuple[str | None, str | None]:
+    """מנרמל את item מהמודל: (שם לשמירה, סוג נכס/קבוצה או None). סוג נכס וקבוצה נשמרים בשם הקנוני,
+    סמל לטיני באותיות גדולות. מחזיר (None, None) אם הערך ריק או ארוך מדי."""
+    item = " ".join(str(args.get("item") or "").split())
+    if not item or len(item) > MAX_RESTRICTION_LENGTH:
+        return None, None
+    target = restriction_target(item)
+    return target or (item.upper() if item.isascii() else item), target
+
+
+def _restriction_text(item: str) -> str:
+    return f"לא לקנות: {item}"
+
+
 def _profile_status(profile: InvestorProfile) -> dict:
     missing = profile.missing_fields()
     return {"missing": missing, "next_field": missing[0] if missing else None, "complete": not missing}
@@ -151,16 +185,32 @@ def run_profile_tool(name: str, args: dict, profile: InvestorProfile,
         kind = args.get("kind") or "no_buy"
         if kind != "no_buy":
             return {"error": f"סוג מגבלה לא נתמך: {kind}. נתמך רק no_buy"}, profile
-        item = " ".join(str(args.get("item") or "").split())
-        if not item or len(item) > MAX_RESTRICTION_LENGTH:
+        item, asset_class = _restriction_item(args)
+        if item is None:
             return {"error": f"חסר מה לא לקנות (עד {MAX_RESTRICTION_LENGTH} תווים), למשל TSLA"}, profile
-        item = item.upper() if item.isascii() else item
 
         data = profile.model_dump()
         data["no_buy_symbols"] = list(dict.fromkeys([*data["no_buy_symbols"], item]))
-        data["restrictions"] = list(dict.fromkeys([*data["restrictions"], f"לא לקנות: {item}"]))
+        data["restrictions"] = list(dict.fromkeys([*data["restrictions"], _restriction_text(item)]))
         new_profile = InvestorProfile(**data)
-        return {"saved": True, "no_buy_symbols": new_profile.no_buy_symbols, **_profile_status(new_profile)}, new_profile
+        result = {"saved": True, "no_buy_symbols": new_profile.no_buy_symbols, "asset_class": asset_class,
+                  "blocked_asset_classes": list(classes_blocked_by(item)),
+                  "affects_proposal": asset_class is not None, **_profile_status(new_profile)}
+        if asset_class is None:
+            result["note"] = (f"{item} אינו סוג נכס. ההצעה והחלוקה החודשית הן לפי סוגי נכסים, "
+                              "ולכן ההגבלה נשמרה אבל לא משנה אותן")
+        return result, new_profile
+
+    if name == "remove_restriction":
+        item, asset_class = _restriction_item(args)
+        if item is None or item not in profile.no_buy_symbols:
+            return {"error": "לא נמצאה הגבלה כזו בפרופיל", "no_buy_symbols": profile.no_buy_symbols}, profile
+        data = profile.model_dump()
+        data["no_buy_symbols"] = [x for x in data["no_buy_symbols"] if x != item]
+        data["restrictions"] = [r for r in data["restrictions"] if r != _restriction_text(item)]
+        new_profile = InvestorProfile(**data)
+        return {"removed": item, "no_buy_symbols": new_profile.no_buy_symbols,
+                "affects_proposal": asset_class is not None, **_profile_status(new_profile)}, new_profile
 
     return {"error": f"כלי פרופיל לא מוכר: {name}"}, profile
 

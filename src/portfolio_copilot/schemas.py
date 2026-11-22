@@ -1,6 +1,8 @@
 from datetime import date
 from typing import Literal, Optional, List
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
+
+LEGACY_NO_SELL_PREFIX = "לא למכור: "  # הגבלות מגרסה קודמת ("לא מוכר"), שכבר אין להן משמעות
  
  
 class InvestorProfile(BaseModel):
@@ -39,9 +41,6 @@ class InvestorProfile(BaseModel):
         default=False, description="האם המשתמש אישר במפורש את רמת הסיכון (או בחר אחרת בעצמו)"
     )
     investment_horizon_years: Optional[int] = Field(default=None, description="אופק ההשקעה בשנים")
-    max_single_asset_weight: Optional[float] = Field(
-        default=0.20, ge=0.05, le=1.0, description="תקרת פיזור לנכס בודד (ברירת מחדל 20%)"
-    )
     agent_reasoning: Optional[str] = Field(
         default=None, description="הסבר קצר של הסוכן מדוע רמת הסיכון והמכשירים האלו מתאימים"
     )
@@ -68,6 +67,12 @@ class InvestorProfile(BaseModel):
     unknown_fields: List[str] = Field(
         default_factory=list, description="שדות שהמשתמש אמר שהוא לא יודע. לא נשאלים שוב"
     )
+
+    @field_validator("restrictions")
+    @classmethod
+    def _drop_legacy_no_sell(cls, value: List[str]) -> List[str]:
+        """פרופיל ישן: מוחק את ההגבלות "לא למכור: X" מהגרסה שבה היו הצעות מכירה. שאר המגבלות נשארות."""
+        return [r for r in value if not str(r).startswith(LEGACY_NO_SELL_PREFIX)]
 
     def is_complete(self) -> bool:
         """מוכן להרצת מנוע החישוב: יש גיל/שלב, אופק, ורמת סיכון שהמשתמש אישר"""
@@ -174,7 +179,6 @@ PROFILE_VALIDATORS = {
     "investment_horizon_years": lambda v: _number(v, 1, 80, integer=True),
     "recommended_risk_level": _choice(RISK_LEVELS),
     "risk_confirmed": _bool,
-    "max_single_asset_weight": lambda v: _number(v, 0.05, 1.0),
     "agent_reasoning": _text,
     "employment_status": _choice(EMPLOYMENT_OPTIONS),
     "marital_status": _choice(MARITAL_OPTIONS),

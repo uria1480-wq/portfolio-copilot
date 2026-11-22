@@ -1,9 +1,10 @@
 """חיבור הכלים לסוכן: הגדרות הכלים שה-LLM רואה, והפונקציה שמריצה אותם.
 כל מספר שהסוכן מציג מגיע מכאן (proposal.py), לא מחישוב של המודל."""
+import re
 from datetime import date
 
 from portfolio_copilot.db import ALL_HISTORY
-from portfolio_copilot.monthly import allocate_monthly, emergency_deposited
+from portfolio_copilot.monthly import allocate_monthly, amount_from_percent_of_net, emergency_deposited
 from portfolio_copilot.proposal import build_proposal
 from portfolio_copilot.restrictions import ASSET_CLASSES, ASSET_GROUPS, classes_blocked_by, restriction_target
 from portfolio_copilot.schemas import (EMPLOYMENT_OPTIONS, LIFE_STAGES, MARITAL_OPTIONS, NONE_ALLOWED, RISK_LEVELS,
@@ -128,7 +129,9 @@ TOOL_SPECS = [*PROFILE_TOOL_SPECS,
             "name": "get_monthly_allocation",
             "description": (
                 "מחלק סכום להשקעה החודש כמו בדף הניהול החודשי: קודם השלמת קרן החירום לכספית (emergency_amount), "
-                "בניכוי מה שכבר הופנה אליה בדיווחים קודמים, והשאר לפי התמהיל (lines). לא שומר דיווח."
+                "בניכוי מה שכבר הופנה אליה בדיווחים קודמים, והשאר לפי התמהיל (lines). לא שומר דיווח. "
+                "סכום בשקלים: amount. אחוז מהנטו: percent_of_net, והקוד מחשב את הסכום מהנטו שבפרופיל. "
+                "שלח אחד מהם בלבד, או אף אחד (ואז נלקחת ההפקדה החודשית מהפרופיל)."
             ),
             "parameters": {
                 "type": "object",
@@ -136,6 +139,11 @@ TOOL_SPECS = [*PROFILE_TOOL_SPECS,
                     "amount": {
                         "type": "number",
                         "description": "סכום בשקלים להשקעה החודש. אם לא צוין, נלקחת ההפקדה החודשית מהפרופיל",
+                    },
+                    "percent_of_net": {
+                        "type": "number",
+                        "description": "אחוז מהנטו החודשי שבפרופיל, למשל 10 עבור 10%. הקוד מחשב את הסכום. "
+                                       "אל תחשב סכום בעצמך ואל תשלח יחד עם amount",
                     },
                 },
                 "required": [],
@@ -172,20 +180,41 @@ def _profile_status(profile: InvestorProfile) -> dict:
     return {"missing": missing, "next_field": missing[0] if missing else None, "complete": not missing}
 
 
-def run_profile_tool(name: str, args: dict, profile: InvestorProfile,
-                     today: date | None = None) -> tuple[dict, InvestorProfile]:
+# הגנה בקוד: "תמכור את המניות שלי" היא לא "אל תקנה". נמצא בסט ההערכה (evals/README.md): המודל שמר הגבלה
+# "מניות" על בקשת מכירה, ושיפור הפרומפט לא עזר. לכן הקוד בודק את הודעת המשתמש עצמה.
+SELL_WORDS = re.compile(r"(?:תמכור|תמכרי|תמכרו|למכור|נמכור|אמכור|מכור|מוכר|מוכרת|מוכרים|מכירה|מכירת|מכירות)")
+NO_BUY_PHRASE = re.compile(
+    r"(?:לא|אל|בלי|להפסיק|תפסיק|הפסק)\s+(?:\S+\s+){0,2}?"
+    r"(?:לקנות|תקנה|תקני|תקנו|לרכוש|תרכוש|תרכשי|קונה|קונים|אקנה|נקנה|להשקיע|תשקיע)")
+SELL_REJECTED = ("המשתמש ביקש למכור, וזו לא הגבלת \"אל תקנה\". בפרויקט אין המלצות מכירה והסוכן לא מבצע פעולות, "
+                 "ולכן לא נשמרה הגבלה. הסבר זאת למשתמש. אם לא ברור אם הוא רוצה גם להפסיק לקנות, שאל אותו")
+
+
+def is_sell_request(user_message: str | None) -> bool:
+    """יש פועל מכירה בהודעה ואין ניסוח של "לא לקנות" / "אל תקנה". None (אין הודעה): לא בודקים."""
+    if not user_message:
+        return False
+    return bool(SELL_WORDS.search(user_message)) and not NO_BUY_PHRASE.search(user_message)
+
+
+def run_profile_tool(name: str, args: dict, profile: InvestorProfile, today: date | None = None,
+                     user_message: str | None = None) -> tuple[dict, InvestorProfile]:
     """מריץ כלי שמשנה את הפרופיל. מחזיר (תוצאה למודל, פרופיל מעודכן). הפרופיל לא משתנה כשיש שגיאה.
-    today משמש לחישוב אופק משנת יעד (ברירת מחדל: date.today())."""
+    today משמש לחישוב אופק משנת יעד (ברירת מחדל: date.today()).
+    user_message: ההודעה האחרונה של המשתמש בתור, כדי שהקוד יבדוק בעצמו מה נאמר (מכירה, "לא יודע").
+    None: בלי הבדיקות האלה (קריאה ישירה, למשל מבדיקות)."""
     args = args if isinstance(args, dict) else {}
 
     if name == "update_profile":
-        new_profile, accepted, rejected = apply_profile_update(profile, args, today)
+        new_profile, accepted, rejected = apply_profile_update(profile, args, today, user_message)
         return {"accepted": accepted, "rejected": rejected, **_profile_status(new_profile)}, new_profile
 
     if name == "add_restriction":
         kind = args.get("kind") or "no_buy"
         if kind != "no_buy":
             return {"error": f"סוג מגבלה לא נתמך: {kind}. נתמך רק no_buy"}, profile
+        if is_sell_request(user_message):
+            return {"error": SELL_REJECTED, "saved": False}, profile
         item, asset_class = _restriction_item(args)
         if item is None:
             return {"error": f"חסר מה לא לקנות (עד {MAX_RESTRICTION_LENGTH} תווים), למשל TSLA"}, profile
@@ -225,13 +254,23 @@ def run_tool(name: str, args: dict, store, user_id: int, profile: InvestorProfil
             return build_proposal(profile, today).model_dump(mode="json")
 
         if name == "get_monthly_allocation":
-            amount = args.get("amount")
-            if amount is None:
+            amount, percent = args.get("amount"), args.get("percent_of_net")
+            if amount is not None and percent is not None:
+                return {"error": "שלח amount (שקלים) או percent_of_net (אחוז מהנטו), לא את שניהם"}
+            percent_reason = None
+            if percent is not None:
+                amount, percent_reason = amount_from_percent_of_net(profile, percent)
+            elif amount is None:
                 amount = profile.monthly_deposit
             if amount is None:
                 return {"error": "לא צוין סכום, ובפרופיל אין הפקדה חודשית"}
             already = emergency_deposited(store.list_salary_events(user_id, limit=ALL_HISTORY))
-            return allocate_monthly(profile, float(amount), today, already).model_dump(mode="json")
+            result = allocate_monthly(profile, float(amount), today, already).model_dump(mode="json")
+            if percent_reason:
+                result["reasons"].insert(0, percent_reason)
+                result["amount_from_percent"] = {"percent_of_net": float(percent),
+                                                 "monthly_net_income": profile.monthly_net_income, "amount": amount}
+            return result
 
         return {"error": f"כלי לא מוכר: {name}"}
     except ValueError as e:

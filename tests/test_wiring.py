@@ -45,7 +45,7 @@ def test_system_prompt_covers_failures_found_in_evals():
     prompt = agent.SYSTEM_PROMPT
     assert "בקשה למכור" in prompt and "אל תקרא ל-add_restriction" in prompt
     assert "מחוץ לתחום" in prompt and "אל תציע הקצאה" in prompt
-    assert "אל תחשב את האחוז בעצמך" in prompt and "ניהול חודשי" in prompt
+    assert "percent_of_net" in prompt and "אל תחשב את הסכום בעצמך" in prompt
     assert 'חובה לקרוא לו גם לשאלות "למה"' in prompt
     assert "תשובה לא ברורה" in prompt and "שאל שוב" in prompt
 

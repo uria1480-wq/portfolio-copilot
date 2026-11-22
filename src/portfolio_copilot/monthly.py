@@ -28,6 +28,24 @@ class MonthlyAllocation(BaseModel):
     reasons: list[str] = Field(default_factory=list)
 
 
+def amount_from_percent_of_net(profile: InvestorProfile, percent) -> tuple[float, str]:
+    """אחוז מהנטו החודשי שבפרופיל -> סכום בשקלים, מחושב בקוד (לא במודל). מחזיר (סכום, נימוק).
+    ValueError אם האחוז לא בין 0 (לא כולל) ל-100, או שאין בפרופיל נטו חיובי."""
+    if isinstance(percent, bool):
+        raise ValueError("percent_of_net צריך להיות מספר, למשל 10")
+    try:
+        pct = float(percent)
+    except (TypeError, ValueError):
+        raise ValueError("percent_of_net צריך להיות מספר, למשל 10")
+    if not 0 < pct <= 100:
+        raise ValueError("האחוז מהנטו צריך להיות גדול מ-0 ועד 100")
+    net = profile.monthly_net_income
+    if not net or net <= 0:
+        raise ValueError("בפרופיל אין הכנסה נטו חודשית, ולכן אי אפשר לחשב אחוז מהנטו. בקש סכום בשקלים")
+    amount = round(net * pct / 100, 2)
+    return amount, f"סכום להשקעה: {pct:g}% מהנטו שלך בפרופיל ({format_money(net)}) = {format_money(amount)}."
+
+
 def emergency_deposited(history: list[dict]) -> float:
     """סך מה שכבר הופנה לקרן החירום בדיווחים חודשיים קודמים (מההיסטוריה השמורה).
     רשומות ישנות בלי allocation נספרות כ-0."""

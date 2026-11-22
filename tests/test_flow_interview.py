@@ -71,7 +71,7 @@ def test_full_journey(monkeypatch):
     _, history, profile, panel, _, _ = out
     assert "✓ יתרת פנסיה" in panel and "✓ החזרי חובות" in panel and "◯ יעד" in panel
 
-    out, _ = say(monkeypatch, chat, "פרישה, 10 שנים. ואני לא מוכר את ZIM", history, profile,
+    out, _ = say(monkeypatch, chat, "פרישה, 10 שנים. ואל תקנה לי ZIM", history, profile,
                  ("update_profile", {"investment_goal": "פרישה", "investment_horizon_years": 10,
                                      "recommended_risk_level": "מאוזן", "agent_reasoning": "אופק בינוני"}),
                  ("add_restriction", {"item": "ZIM"}), reply="מציע רמת סיכון מאוזנת. מתאים לך?")

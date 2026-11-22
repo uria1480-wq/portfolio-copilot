@@ -1,5 +1,7 @@
 import os
 
+import pytest
+
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
 os.environ.setdefault("OPENAI_BASE_URL", "http://localhost")
 
@@ -136,4 +138,78 @@ def test_every_model_call_has_a_token_cap(monkeypatch):
 
 def test_system_prompt_names_the_course():
     assert 'פיתוח פתרונות מבוססי AI' in agent.SYSTEM_PROMPT and "מבוא לבינה מלאכותית" not in agent.SYSTEM_PROMPT
+
+
+# ---------- הגנה מטענת ביצוע כוזבת ----------
+@pytest.mark.parametrize("reply", ["רשמתי לפניי שאתה לא רוצה מניות.", "שמרתי את ההגבלה.", "עדכנתי את הפרופיל שלך."])
+def test_save_claim_without_profile_tool_gets_a_note(monkeypatch, reply):
+    fake = FakeClient([Msg(content=reply)])
+    monkeypatch.setattr(agent, "client", fake)
+    s, uid = store_with_holding()
+    out, profile = agent.chat_step([{"role": "user", "content": "תמכור את המניות שלי"}], InvestorProfile(), s, uid)
+    assert out.startswith(reply) and out.endswith(f"({agent.NOT_SAVED_NOTE})") and profile == InvestorProfile()
+
+
+def test_save_claim_after_profile_tool_is_left_alone(monkeypatch):
+    fake = FakeClient([Msg(tool_calls=[Call("c1", "update_profile", '{"age": 40}')]), Msg(content="עדכנתי את הגיל.")])
+    monkeypatch.setattr(agent, "client", fake)
+    s, uid = store_with_holding()
+    out, profile = agent.chat_step([{"role": "user", "content": "אני בן 40"}], InvestorProfile(), s, uid)
+    assert out == "עדכנתי את הגיל." and profile.age == 40
+
+
+def test_save_claim_after_other_tool_only_still_gets_a_note(monkeypatch):
+    fake = FakeClient([Msg(tool_calls=[Call("c1", "get_proposal")]), Msg(content="רשמתי ושמרתי את ההגבלה.")])
+    monkeypatch.setattr(agent, "client", fake)
+    s, uid = store_with_holding()
+    out, _ = agent.chat_step([{"role": "user", "content": "אל תקנה מניות"}], InvestorProfile(), s, uid)
+    assert agent.NOT_SAVED_NOTE in out
+
+
+def test_reply_without_save_claim_is_unchanged():
+    assert agent.guard_save_claim("ההצעה שלך מוכנה.", False) == "ההצעה שלך מוכנה."
+    assert agent.guard_save_claim("", False) == ""
+
+
+# ---------- "למה" על ההצעה: הקוד מכריח get_proposal ----------
+def complete():
+    return InvestorProfile(age=35, marital_status="רווק", employment_status="שכיר/ה", monthly_net_income=20000,
+                           monthly_expenses=10000, liquid_savings=60000, monthly_debt_payments=0,
+                           monthly_deposit=3000, pension_balance=1, study_fund_balance=1, other_assets=0,
+                           investment_goal="פרישה", investment_horizon_years=20, recommended_risk_level="מאוזן",
+                           risk_confirmed=True)
+
+
+@pytest.mark.parametrize("question", ['למה יש לי אג"ח בתמהיל?', "מדוע 65% מניות?", "למה הכספית כל כך גבוהה?",
+                                      "מה הסיבה למסלול הפנסיה הזה?"])
+def test_why_question_about_proposal_forces_get_proposal_in_first_round_only(monkeypatch, question):
+    fake = FakeClient([Msg(tool_calls=[Call("c1", "get_proposal")]), Msg(content=FINAL)])
+    monkeypatch.setattr(agent, "client", fake)
+    s, uid = store_with_holding()
+    agent.chat_step([{"role": "user", "content": question}], complete(), s, uid)
+    assert fake.calls[0]["tool_choice"] == agent.FORCE_PROPOSAL and "tool_choice" not in fake.calls[1]
+
+
+@pytest.mark.parametrize("question", ["מה ההצעה שלי?", "למה אתה שואל את זה?", "תודה!"])
+def test_other_messages_do_not_force_a_tool(monkeypatch, question):
+    fake = FakeClient([Msg(content=FINAL)])
+    monkeypatch.setattr(agent, "client", fake)
+    s, uid = store_with_holding()
+    agent.chat_step([{"role": "user", "content": question}], complete(), s, uid)
+    assert "tool_choice" not in fake.calls[0]
+
+
+def test_why_question_during_interview_does_not_force(monkeypatch):
+    fake = FakeClient([Msg(content=FINAL)])
+    monkeypatch.setattr(agent, "client", fake)
+    s, uid = store_with_holding()
+    agent.chat_step([{"role": "user", "content": "למה אתה שואל על הפנסיה שלי?"}], InvestorProfile(age=30), s, uid)
+    assert "tool_choice" not in fake.calls[0]
+
+
+def test_without_store_there_is_no_forcing(monkeypatch):
+    fake = FakeClient([Msg(content=FINAL)])
+    monkeypatch.setattr(agent, "client", fake)
+    agent.chat_step([{"role": "user", "content": 'למה יש לי אג"ח בתמהיל?'}], complete())
+    assert "tool_choice" not in fake.calls[0] and "tools" not in fake.calls[0]
 

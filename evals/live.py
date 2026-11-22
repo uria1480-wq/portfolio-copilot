@@ -49,8 +49,8 @@ class Recorder:
         completions = agent.client.chat.completions
         self._create = completions.create
 
-        def profile_tool(name, args, profile, today=None):
-            result, new_profile = self._profile_tool(name, args, profile, today)
+        def profile_tool(name, args, profile, today=None, user_message=None):
+            result, new_profile = self._profile_tool(name, args, profile, today, user_message)
             self.calls.append(ToolCall(name, dict(args or {}), result))
             return result, new_profile
 

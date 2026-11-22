@@ -237,3 +237,53 @@ def test_legacy_no_sell_restrictions_are_dropped_and_others_kept():
     p = InvestorProfile.model_validate_json(
         '{"restrictions": ["לא למכור: ZIM", "בלי נשק", "לא לקנות: TSLA"], "no_buy_symbols": ["TSLA"]}')
     assert p.restrictions == ["בלי נשק", "לא לקנות: TSLA"]
+
+
+# ---------- מכירה היא לא "אל תקנה" (הגנה בקוד, נמצא בסט ההערכה) ----------
+SELL_MESSAGES = ["תמכור את המניות שלי", "מכור את הכספית", "אני רוצה למכור את האג\"ח", "תמכרי לי את מדד ארה\"ב",
+                 "נמכור את הכל?", "אפשר מכירה של המניות?", "תעשה מכירת מניות"]
+NO_BUY_MESSAGES = ["אל תקנה לי מניות", "אני לא רוצה לקנות מניות", "לא לקנות כספית", "בלי לקנות אג\"ח",
+                   "תפסיק לקנות מניות", "אני לא קונה טסלה", "אל תרכוש מדד עולמי",
+                   "אני מוכר את המניות לבד, אז אל תקנה לי עוד", "תמכור? לא, פשוט לא לקנות יותר מניות"]
+
+
+@pytest.mark.parametrize("message", SELL_MESSAGES)
+def test_sell_request_is_rejected_in_code_and_profile_unchanged(message):
+    p = person()
+    result, same = run_profile_tool("add_restriction", {"item": "מניות"}, p, user_message=message)
+    assert same is p and same.no_buy_symbols == [] and result["saved"] is False
+    assert "אין המלצות מכירה" in result["error"] and "לא נשמרה הגבלה" in result["error"]
+
+
+@pytest.mark.parametrize("message", NO_BUY_MESSAGES)
+def test_explicit_no_buy_is_saved_even_with_a_sell_word(message):
+    result, p = run_profile_tool("add_restriction", {"item": "מניות"}, person(), user_message=message)
+    assert result["saved"] and p.no_buy_symbols == ["מניות"]
+
+
+def test_without_user_message_there_is_no_sell_check():
+    result, p = run_profile_tool("add_restriction", {"item": "מניות"}, person())
+    assert result["saved"] and p.no_buy_symbols == ["מניות"]
+
+
+def test_chat_step_passes_last_user_message_to_the_tool(monkeypatch):
+    import json
+
+    from test_agent_flow import Call, FakeClient, Msg
+
+    from portfolio_copilot import agent
+    from portfolio_copilot.db import Store
+
+    fake = FakeClient([Msg(tool_calls=[Call("c1", "add_restriction", json.dumps({"item": "מניות"}))]),
+                       Msg(content="אין המלצות מכירה")])
+    monkeypatch.setattr(agent, "client", fake)
+    s = Store(":memory:")
+    uid = s.get_or_create_user("demo")
+    history = [{"role": "user", "content": "אל תקנה טסלה"}, {"role": "assistant", "content": "שמרתי"},
+               {"role": "user", "content": "תמכור את המניות שלי"}]
+    _, profile = agent.chat_step(history, person(), s, uid)
+    assert profile.no_buy_symbols == [] and s.load_profile(uid).no_buy_symbols == []
+    tool_msg = [m for m in fake.calls[1]["messages"] if m["role"] == "tool"][0]
+    assert "אין המלצות מכירה" in tool_msg["content"]
+    assert agent.last_user_message(history) == "תמכור את המניות שלי" and agent.last_user_message([]) is None
+

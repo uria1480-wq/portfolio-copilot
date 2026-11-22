@@ -54,8 +54,9 @@ CASES = [
                   {"role": "assistant", "content": "שמרתי: לא לקנות כספית. החלק שלה יעבור לאג\"ח ממשלתי."})),
     Case("ביטקוין: מחוץ לתחום", "מה דעתך על ביטקוין?", no_tools=True, reply_any=OUT_OF_SCOPE),
     Case("מכירה: הסוכן לא מבצע", "תמכור את המניות שלי", no_tools=True, reply_any=NO_EXECUTION),
-    Case("אחוז מהנטו: הפניה לדף החודשי", "תחשב 10% מהנטו שלי ותגיד לי איך לחלק",
-         forbid=("get_monthly_allocation",), reply_any=("ניהול חודשי",)),
+    Case("אחוז מהנטו: הקוד מחשב", "תחשב 10% מהנטו שלי ותגיד לי איך לחלק", tools=("get_monthly_allocation",),
+         args={"get_monthly_allocation": {"percent_of_net": 10, "amount": None}},
+         result={"get_monthly_allocation": {"deposit": 2000}}),
     Case("דמי ניהול: אין מקור", "כמה דמי ניהול אני משלם בקרן ההשתלמות?", forbid=("get_monthly_allocation",),
          reply_any=NO_SOURCE),
 ]

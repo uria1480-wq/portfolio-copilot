@@ -2,6 +2,8 @@
 import json
 from datetime import date
 
+import pytest
+
 from test_agent_flow import Call, FakeClient, Msg  # קודם: מגדיר משתני סביבה לפני יבוא agent
 from portfolio_copilot import agent
 from portfolio_copilot.agent_tools import run_profile_tool, tool_specs
@@ -428,3 +430,36 @@ def test_each_round_prints_llm_time_and_tools(monkeypatch, capsys):
     assert len(lines) == 2
     assert lines[0].startswith("[agent] round 1: LLM ") and "update_profile (" in lines[0] and "get_proposal (" in lines[0]
     assert lines[1].startswith("[agent] round 2: LLM ") and "tools: none" in lines[1]
+
+
+# ---------- "לא יודע" רק כשנאמר במפורש (הגנה בקוד, נמצא בסט ההערכה) ----------
+@pytest.mark.parametrize("message", ["לא יודע", "לא יודעת כמה יש לי בפנסיה", "אין לי מושג", "אין   לי   מושג בכלל",
+                                     "אין לי תשובה לזה", "לא זוכר", "האמת שלא ידוע לי"])
+def test_explicit_unknown_is_recorded(message):
+    p, accepted, rejected = apply_profile_update(InvestorProfile(), {"unknown_fields": ["pension_balance"]},
+                                                 user_message=message)
+    assert p.unknown_fields == ["pension_balance"] and accepted["pension_balance"] == "unknown" and not rejected
+
+
+@pytest.mark.parametrize("message", ["אממ... תלוי", "בערך?", "קשה לומר", "נו באמת", "יש לי פנסיה", ""])
+def test_unclear_answer_is_not_recorded_as_unknown(message):
+    p, accepted, rejected = apply_profile_update(InvestorProfile(), {"unknown_fields": ["pension_balance"]},
+                                                 user_message=message)
+    assert p.unknown_fields == [] and p.pension_balance is None and "pension_balance" not in accepted
+    assert "שאל שוב" in rejected["pension_balance"]
+
+
+def test_unclear_answer_rejects_unknown_but_keeps_other_values():
+    p, accepted, rejected = apply_profile_update(
+        InvestorProfile(), {"age": 30, "unknown_fields": ["pension_balance"], "none_fields": ["monthly_debt_payments"]},
+        user_message="אני בן 30, אין לי חובות, ופנסיה... תלוי")
+    assert p.age == 30 and p.monthly_debt_payments == 0 and p.unknown_fields == []
+    assert set(rejected) == {"pension_balance"}
+
+
+def test_unknown_check_runs_through_the_tool_and_chat_step(monkeypatch):
+    result, p = run_profile_tool("update_profile", {"unknown_fields": ["monthly_expenses"]}, InvestorProfile(),
+                                 user_message="אממ... תלוי")
+    assert p.unknown_fields == [] and "monthly_expenses" in result["rejected"]
+    assert "monthly_expenses" in result["missing"]  # השדה עדיין חסר, ולכן הסוכן ישאל שוב
+

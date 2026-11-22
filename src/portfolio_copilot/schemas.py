@@ -128,6 +128,21 @@ UNKNOWN_ALLOWED = ("employment_status", *AMOUNT_FIELDS, "investment_goal")
 NONE_ALLOWED = (*AMOUNT_FIELDS, "investment_goal")
 GOAL_NONE_TEXT = "אין יעד מוגדר"
 
+# "לא יודע" מתקבל רק כשהמשתמש אמר זאת במפורש. בסט ההערכה המודל סימן "לא יודע" על "אממ... תלוי",
+# ושיפור הפרומפט לא עזר, ולכן הקוד בודק את הודעת המשתמש עצמה.
+EXPLICIT_UNKNOWN_PHRASES = ("לא יודע", "לא יודעת", "לא יודעים", "לא ידוע", "אין לי מושג", "אין מושג", "אין לי תשובה",
+                            "אין לי מידע", "לא זוכר", "לא זוכרת", "אין לי דרך לדעת")
+UNKNOWN_NOT_SAID = ("המשתמש לא אמר במפורש שהוא לא יודע, ולכן השדה לא סומן 'לא יודע'. "
+                    "שאל שוב על השדה בניסוח פשוט, ואפשר לבקש הערכה גסה")
+
+
+def said_unknown(user_message: str | None) -> bool:
+    """האם בהודעה יש ניסוח מפורש של "לא יודע". None (אין הודעה, למשל קריאה ישירה מבדיקה): לא בודקים."""
+    if user_message is None:
+        return True
+    text = " ".join(str(user_message).split())
+    return any(phrase in text for phrase in EXPLICIT_UNKNOWN_PHRASES)
+
 
 def _number(value, low=None, high=None, integer=False):
     """ממיר ערך למספר ובודק טווח. מחזיר (ערך, None) או (None, סיבת דחייה)."""
@@ -209,8 +224,8 @@ def horizon_from_target_year(value, today: date) -> tuple[int | None, str | None
     return horizon, None
 
 
-def apply_profile_update(current: InvestorProfile, patch: dict,
-                         today: date | None = None) -> tuple[InvestorProfile, dict, dict]:
+def apply_profile_update(current: InvestorProfile, patch: dict, today: date | None = None,
+                         user_message: str | None = None) -> tuple[InvestorProfile, dict, dict]:
     """מעדכן פרופיל מערכים שהמודל חילץ, אחרי בדיקה בקוד של כל שדה בנפרד.
 
     מחזיר (פרופיל חדש, מה התקבל, מה נדחה וסיבה). ערך null מדולג. שדה לא מוכר נדחה.
@@ -236,6 +251,10 @@ def apply_profile_update(current: InvestorProfile, patch: dict,
         if reason:
             rejected[key] = reason
         markers[key] = names or []
+    if markers["unknown_fields"] and not said_unknown(user_message):
+        for name in markers["unknown_fields"]:
+            rejected[name] = UNKNOWN_NOT_SAID
+        markers["unknown_fields"] = []
     conflicts = ({k for k in markers["unknown_fields"] + markers["none_fields"] if patch.get(k) is not None}
                  | (set(markers["unknown_fields"]) & set(markers["none_fields"])))
     for name in conflicts:

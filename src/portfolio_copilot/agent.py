@@ -83,8 +83,8 @@ SYSTEM_PROMPT = """אתה Portfolio Copilot – מתכנן ומאפיין פינ
   ההסבר חייב להתבסס על reasons ועל האחוזים שהכלי החזיר, לא על הסבר כללי.
 - get_monthly_allocation: איך מתחלק סכום להשקעה החודש: קודם השלמת קרן החירום לכספית, והשאר לפי התמהיל.
   קרא לו כשהמשתמש שואל איך לחלק סכום. אם לא נאמר סכום, הכלי לוקח את ההפקדה החודשית מהפרופיל.
-  אם המשתמש נתן אחוז מהנטו ולא סכום ("תחשב 10% מהנטו"), אל תחשב את האחוז בעצמך ואל תקרא ל-get_monthly_allocation
-  עם סכום שחישבת. הפנה אותו לדף "ניהול חודשי", שמחשב את האחוז בקוד, או בקש ממנו סכום בשקלים.
+  אם המשתמש נתן אחוז מהנטו ולא סכום ("תחשב 10% מהנטו"), שלח percent_of_net (למשל 10) ולא amount: הקוד מחשב את
+  הסכום מהנטו שבפרופיל. אל תחשב את הסכום בעצמך, וקח אותו מ-amount_from_percent שהכלי החזיר.
 
 כללי שימוש בכלים:
 - כל מספר שאתה מציג מההצעה או מהחלוקה חייב להגיע מתוצאת כלי. אל תחשב ואל תנחש בעצמך.
@@ -111,6 +111,32 @@ def salvage_reply(text: str) -> str | None:
 
 
 FALLBACK_REPLY = "לא הצלחתי לעבד את התשובה, אפשר לנסח שוב?"
+
+# הגנה מטענת ביצוע כוזבת: בסט ההערכה הסוכן כתב "רשמתי... עדכנתי את ההגבלה" בלי שקרא לכלי.
+# אם בתשובה יש פועל של שמירה ובתור לא רץ אף כלי פרופיל, הקוד מוסיף הבהרה. הפרופיל נשמר רק דרך הכלים.
+SAVE_CLAIM = re.compile(r"(?:רשמתי|שמרתי|עדכנתי)")
+
+# שאלת "למה" על ההצעה: בסט ההערכה המודל ענה הסבר כללי בלי get_proposal, גם אחרי שיפור הפרומפט.
+# לכן בסבב הראשון הקוד מכריח קריאה ל-get_proposal (tool_choice), וההסבר מתבסס על reasons מהקוד.
+# רק כשהראיון הושלם: בזמן הראיון "למה" הוא בדרך כלל שאלה על השאלות עצמן.
+WHY_WORDS = ("למה", "מדוע", "מה הסיבה", "איך זה ש")
+PROPOSAL_WORDS = ("הצעה", "תמהיל", 'אג"ח', "אג״ח", "אגח", "מניות", "מדד", "כספית", "ממשלתי", "קונצרני",
+                  "קרן חירום", "קרן החירום", "פנסיה", "השתלמות", "מסלול", "אחוז", "%")
+FORCE_PROPOSAL = {"type": "function", "function": {"name": "get_proposal"}}
+
+
+def is_proposal_why_question(text: str | None) -> bool:
+    """האם ההודעה שואלת "למה" על ההצעה (מילת "למה" ומילה מתחום ההצעה)."""
+    text = text or ""
+    return any(w in text for w in WHY_WORDS) and any(w in text for w in PROPOSAL_WORDS)
+NOT_SAVED_NOTE = "לא נשמר שינוי בפרופיל."
+
+
+def guard_save_claim(reply: str, profile_tool_ran: bool) -> str:
+    """מוסיף NOT_SAVED_NOTE אם התשובה טוענת ששמרה משהו, ובתור לא רץ כלי פרופיל."""
+    if profile_tool_ran or not SAVE_CLAIM.search(reply or ""):
+        return reply
+    return f"{reply.rstrip()}\n\n({NOT_SAVED_NOTE})"
 
 
 def final_reply_text(raw: str | None) -> str:
@@ -140,6 +166,14 @@ def recent_history(messages_history: list[dict], limit: int = MAX_HISTORY_MESSAG
     return list(messages_history[-limit:]) if limit > 0 else []
 
 
+def last_user_message(messages_history: list[dict]) -> str | None:
+    """ההודעה האחרונה של המשתמש בשיחה. הכלים מקבלים אותה כדי לבדוק בקוד מה נאמר בפועל."""
+    for message in reversed(messages_history):
+        if message.get("role") == "user" and isinstance(message.get("content"), str):
+            return message["content"]
+    return None
+
+
 def chat_step(messages_history: list[dict], current_profile: InvestorProfile,
               store=None, user_id: int | None = None,
               today: datetime.date | None = None) -> tuple[str, InvestorProfile]:
@@ -160,6 +194,10 @@ def chat_step(messages_history: list[dict], current_profile: InvestorProfile,
     ]
     prompt_messages.extend(recent_history(messages_history))
     use_tools = store is not None and user_id is not None
+    user_message = last_user_message(messages_history)
+    profile_tool_ran = False
+    force_proposal = (use_tools and is_proposal_why_question(user_message)
+                      and not current_profile.missing_fields())
 
     try:
         for round_no in range(MAX_TOOL_ROUNDS + 1):
@@ -167,6 +205,8 @@ def chat_step(messages_history: list[dict], current_profile: InvestorProfile,
                       "max_tokens": MAX_REPLY_TOKENS}
             if use_tools and round_no < MAX_TOOL_ROUNDS:
                 kwargs["tools"] = tool_specs()
+                if round_no == 0 and force_proposal:
+                    kwargs["tool_choice"] = FORCE_PROPOSAL
             started = time.perf_counter()
             response = client.chat.completions.create(**kwargs)
             llm_seconds = time.perf_counter() - started
@@ -186,7 +226,9 @@ def chat_step(messages_history: list[dict], current_profile: InvestorProfile,
                 except json.JSONDecodeError:
                     args = {}
                 if call.function.name in PROFILE_TOOLS:
-                    result, new_profile = run_profile_tool(call.function.name, args, current_profile, today)
+                    profile_tool_ran = True
+                    result, new_profile = run_profile_tool(call.function.name, args, current_profile, today,
+                                                           user_message)
                     if new_profile != current_profile:
                         current_profile = new_profile
                         prompt_messages[1] = profile_message(current_profile)
@@ -205,7 +247,7 @@ def chat_step(messages_history: list[dict], current_profile: InvestorProfile,
             print(f"[agent] round {round_no + 1}: LLM {llm_seconds:.2f}s | tools: {', '.join(tool_timings)}")
 
         # הפרופיל כבר עודכן בכלים. התשובה הסופית היא טקסט בלבד ולא משנה אותו.
-        return final_reply_text(message.content), current_profile
+        return guard_save_claim(final_reply_text(message.content), profile_tool_ran), current_profile
 
     except Exception as e:
         return f"שגיאה בתקשורת עם הסוכן: {e}", current_profile

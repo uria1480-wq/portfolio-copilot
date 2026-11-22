@@ -146,7 +146,7 @@ def test_save_claim_without_profile_tool_gets_a_note(monkeypatch, reply):
     fake = FakeClient([Msg(content=reply)])
     monkeypatch.setattr(agent, "client", fake)
     s, uid = store_with_holding()
-    out, profile = agent.chat_step([{"role": "user", "content": "תמכור את המניות שלי"}], InvestorProfile(), s, uid)
+    out, profile = agent.chat_step([{"role": "user", "content": "אני לא רוצה מניות"}], InvestorProfile(), s, uid)
     assert out.startswith(reply) and out.endswith(f"({agent.NOT_SAVED_NOTE})") and profile == InvestorProfile()
 
 
@@ -212,4 +212,49 @@ def test_without_store_there_is_no_forcing(monkeypatch):
     monkeypatch.setattr(agent, "client", fake)
     agent.chat_step([{"role": "user", "content": 'למה יש לי אג"ח בתמהיל?'}], complete())
     assert "tool_choice" not in fake.calls[0] and "tools" not in fake.calls[0]
+
+
+# ---------- תשובה קבועה בקוד: מחוץ לתחום ומכירה ----------
+OUT_OF_SCOPE_MESSAGES = ["מה דעתך על ביטקוין?", "כמה לשים בקריפטו?", "כדאי לקנות Bitcoin?", "מה עם BTC?",
+                         'כדאי לי להשקיע בנדל"ן?', "כדאי לקנות זהב?", "מה דעתך על מטבעות דיגיטליים?",
+                         "אתריום זה רעיון טוב?"]
+SELL_FIXED_MESSAGES = ["תמכור את המניות שלי", "מכור את הכספית", "אני רוצה למכור את האג\"ח", "ולמכור הכל?",
+                       "תמכרי לי את המדד"]
+PASS_THROUGH_MESSAGES = ["מה דעתך על ההצעה?", "מה ההצעה שלי?", "אל תקנה לי מניות", "אני לא רוצה לקנות מניות",
+                         "אני מוכר בחנות", "יש לי נדל\"ן בשווי 2 מיליון", "למה כתוב ריכוז בנדל\"ן?",
+                         "אני רוצה למכור? לא, פשוט לא לקנות יותר מניות", "כמה חסר לי בקרן החירום?"]
+
+
+@pytest.mark.parametrize("message", OUT_OF_SCOPE_MESSAGES + SELL_FIXED_MESSAGES)
+def test_fixed_reply_without_llm(monkeypatch, message):
+    fake = FakeClient([Msg(content="לא אמור להיקרא")])
+    monkeypatch.setattr(agent, "client", fake)
+    s, uid = store_with_holding()
+    reply, profile = agent.chat_step([{"role": "user", "content": message}], complete(), s, uid)
+    assert reply == agent.OUT_OF_SCOPE_REPLY and fake.calls == [] and profile == complete()
+
+
+@pytest.mark.parametrize("message", PASS_THROUGH_MESSAGES)
+def test_regular_messages_go_to_the_model(monkeypatch, message):
+    fake = FakeClient([Msg(content=FINAL)])
+    monkeypatch.setattr(agent, "client", fake)
+    s, uid = store_with_holding()
+    reply, _ = agent.chat_step([{"role": "user", "content": message}], complete(), s, uid)
+    assert reply == FINAL and len(fake.calls) == 1
+
+
+def test_out_of_scope_word_during_interview_goes_to_the_model(monkeypatch):
+    """בראיון "נדל"ן" הוא תשובה על נכסים אחרים, ולא בקשה להקצאה."""
+    fake = FakeClient([Msg(content=FINAL)])
+    monkeypatch.setattr(agent, "client", fake)
+    reply, _ = agent.chat_step([{"role": "user", "content": 'נדל"ן, בערך מיליון'}], InvestorProfile(age=30))
+    assert reply == FINAL
+    assert agent.fixed_reply_for("תמכור הכל", InvestorProfile()) == agent.OUT_OF_SCOPE_REPLY  # מכירה: גם בראיון
+
+
+def test_fixed_reply_text_and_word_lists():
+    assert agent.OUT_OF_SCOPE_REPLY == ("אין בפרויקט המלצות מכירה או הקצאה לנכסים מחוץ לחמשת סוגי הנכסים. "
+                                        "אפשר לראות את ההצעה או לשנות הגבלת קנייה.")
+    assert "ביטקוין" in agent.OUT_OF_SCOPE_WORDS and 'נדל"ן' in agent.OUT_OF_SCOPE_WORDS
+    assert agent.fixed_reply_for("", complete()) is None and agent.fixed_reply_for(None, complete()) is None
 

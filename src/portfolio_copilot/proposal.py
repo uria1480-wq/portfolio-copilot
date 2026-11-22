@@ -9,9 +9,9 @@ from datetime import date
 
 from pydantic import BaseModel, Field
 
-from portfolio_copilot.restrictions import (ASSET_CLASSES, CORP_BONDS, EQUITY_CLASSES, GOV_BONDS, MONEY_MARKET,
-                                            US_EQUITY, WORLD_EQUITY, apply_restrictions, blocked_classes,
-                                            blocked_groups, emergency_asset_class)
+from portfolio_copilot.restrictions import (ASSET_CLASSES, BOND_GROUP, CORP_BONDS, EQUITY_CLASSES, EQUITY_GROUP,
+                                            GOV_BONDS, MONEY_MARKET, US_EQUITY, WORLD_EQUITY, apply_restrictions,
+                                            blocked_classes, blocked_groups, emergency_asset_class)
 from portfolio_copilot.schemas import InvestorProfile, format_money
 
 # ---------- קבועים (לשנות כאן) ----------
@@ -75,6 +75,17 @@ class CapitalSection(BaseModel):
     allocation: list[AllocationLine]
     liquid_surplus: float | None = None
     monthly_deposit: float | None = None
+    # סכומים לפי קבוצה, אחרי הגבלות: {"מניות": .., 'אג"ח': .., "כספית": ..}. מחושבים כאן, כדי שהסוכן לא יחבר בעצמו
+    totals: dict[str, float] = Field(default_factory=dict)
+
+
+def group_totals(pct: dict[str, float]) -> dict[str, float]:
+    """סך האחוזים בכל קבוצה: מניות (ארה"ב + עולמי), אג"ח (ממשלתי + קונצרני) וכספית. סכומם 100."""
+    return {
+        EQUITY_GROUP: round(sum(pct[k] for k in EQUITY_CLASSES), 2),
+        BOND_GROUP: round(pct[GOV_BONDS] + pct[CORP_BONDS], 2),
+        MONEY_MARKET: round(pct[MONEY_MARKET], 2),
+    }
 
 
 class PensionSection(BaseModel):
@@ -252,7 +263,7 @@ def build_proposal(profile: InvestorProfile, today: date | None = None) -> Propo
         if deposit and safety.months_to_fill:
             reasons.append(f"ההפקדה החודשית מתחלקת לפי התמהיל אחרי {safety.months_to_fill} חודשים של השלמת קרן החירום.")
         capital = CapitalSection(
-            equity_percent=eq, liquid_surplus=surplus, monthly_deposit=deposit,
+            equity_percent=eq, liquid_surplus=surplus, monthly_deposit=deposit, totals=group_totals(pct),
             allocation=[AllocationLine(asset_class=k, percent=pct[k],
                                        existing_amount=existing_parts[k] if existing_parts else None,
                                        monthly_amount=monthly_parts[k] if monthly_parts else None)

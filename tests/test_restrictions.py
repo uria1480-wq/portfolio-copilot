@@ -280,10 +280,10 @@ def test_chat_step_passes_last_user_message_to_the_tool(monkeypatch):
     s = Store(":memory:")
     uid = s.get_or_create_user("demo")
     history = [{"role": "user", "content": "אל תקנה טסלה"}, {"role": "assistant", "content": "שמרתי"},
-               {"role": "user", "content": "תמכור את המניות שלי"}]
+               {"role": "user", "content": "אפשר מכירה של המניות?"}]  # עוקף את התשובה הקבועה, ונעצר בכלי
     _, profile = agent.chat_step(history, person(), s, uid)
     assert profile.no_buy_symbols == [] and s.load_profile(uid).no_buy_symbols == []
     tool_msg = [m for m in fake.calls[1]["messages"] if m["role"] == "tool"][0]
     assert "אין המלצות מכירה" in tool_msg["content"]
-    assert agent.last_user_message(history) == "תמכור את המניות שלי" and agent.last_user_message([]) is None
+    assert agent.last_user_message(history) == "אפשר מכירה של המניות?" and agent.last_user_message([]) is None
 

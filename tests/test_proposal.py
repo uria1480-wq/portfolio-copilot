@@ -488,3 +488,28 @@ def test_single_person_partner_pension_and_study_are_ignored():
                        partner_net=15000, partner_pension=1500, partner_study_fund=600)
     assert (r.household_net, r.total_pension, r.total_study_fund) == (20000, 2000, 800)
     assert r.partner_pension is None and r.partner_study_fund is None
+
+
+# ---------- totals: סכומים לפי קבוצה, מחושבים בקוד ----------
+def test_proposal_totals_by_group():
+    capital = build_proposal(person(investment_horizon_years=20), TODAY).capital
+    assert capital.totals == {"מניות": 65, 'אג"ח': 24.5, "כספית": 10.5}
+    assert round(sum(capital.totals.values()), 2) == 100 and capital.totals["מניות"] == capital.equity_percent
+
+
+def test_totals_follow_restrictions():
+    totals = build_proposal(person(investment_horizon_years=20, no_buy_symbols=["מניות"]), TODAY).capital.totals
+    assert totals == {"מניות": 0, 'אג"ח': 24.5, "כספית": 75.5}
+
+
+def test_get_proposal_tool_returns_totals_and_prompt_says_to_use_them():
+    from portfolio_copilot import agent
+    from portfolio_copilot.agent_tools import run_tool, tool_specs
+    from portfolio_copilot.db import Store
+
+    s = Store(":memory:")
+    result = run_tool("get_proposal", {}, s, s.get_or_create_user("d"), person(investment_horizon_years=20), TODAY)
+    assert result["capital"]["totals"] == {"מניות": 65.0, 'אג"ח': 24.5, "כספית": 10.5}
+    spec = next(t for t in tool_specs() if t["function"]["name"] == "get_proposal")
+    assert "capital.totals" in spec["function"]["description"] and "capital.totals" in agent.SYSTEM_PROMPT
+

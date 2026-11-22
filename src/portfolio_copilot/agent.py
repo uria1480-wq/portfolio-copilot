@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from portfolio_copilot.schemas import InvestorProfile
 from portfolio_copilot.documents import extract_json, read_document
-from portfolio_copilot.agent_tools import PROFILE_TOOLS, run_profile_tool, run_tool, tool_specs
+from portfolio_copilot.agent_tools import NO_BUY_PHRASE, PROFILE_TOOLS, run_profile_tool, run_tool, tool_specs
 
 load_dotenv()
 
@@ -24,6 +24,20 @@ MAX_TOOL_ROUNDS = 4
 # וכמה טוקנים מותר למודל לייצר בתשובה אחת (בכל סבב של הלולאה)
 MAX_HISTORY_MESSAGES = 20
 MAX_REPLY_TOKENS = 2048
+
+# ---------- תשובה קבועה בקוד, בלי LLM (נמצא בסט ההערכה: הפרומפט לא הספיק) ----------
+# (א) נכס מחוץ לתחום: המודל נתן "1%-5%" לביטקוין גם אחרי כללים בפרומפט.
+# (ב) בקשת מכירה: המודל שמר "אל תקנה מניות", או שאל "איזה מניות למכור?".
+OUT_OF_SCOPE_REPLY = ("אין בפרויקט המלצות מכירה או הקצאה לנכסים מחוץ לחמשת סוגי הנכסים. "
+                      "אפשר לראות את ההצעה או לשנות הגבלת קנייה.")
+# נכסים מחוץ לתחום. ההתאמה היא לפי הופעה בטקסט (גם עם תחילית: "בביטקוין", "לקריפטו"), ובאנגלית בלי תלות ברישיות
+OUT_OF_SCOPE_WORDS = ("ביטקוין", "bitcoin", "btc", "קריפטו", "crypto", "אתריום", "ethereum", "מטבע דיגיטלי",
+                      "מטבעות דיגיטליים", "מטבעות", "nft", 'נדל"ן', "נדל״ן", "נדלן", "זהב")
+# אם אחת מאלה מופיעה, ההודעה היא מידע על המשתמש או שאלה על ההצעה, ולא בקשה להקצאה ("יש לי נדל"ן בשווי...",
+# "למה כתוב ריכוז בנדל"ן?"). אז ההודעה עוברת למודל כרגיל
+OUT_OF_SCOPE_EXEMPT = ("יש לי", "שווי", "ריכוז", "נכסים אחרים")
+# בקשת מכירה: רק צורות של בקשה. לא "מוכר" ("אני מוכר בחנות") ולא "מכירה"
+SELL_REQUEST = re.compile(r"(?<![א-ת])[וש]?(?:תמכור|תמכרי|תמכרו|מכור|מכרו|למכור|נמכור)(?![א-ת])")
 
 
 def read_payslip(path: str) -> dict:
@@ -81,6 +95,8 @@ SYSTEM_PROMPT = """אתה Portfolio Copilot – מתכנן ומאפיין פינ
   ומה חסר. קרא לו כשהמשתמש שואל מה כדאי לו, על התמהיל, על קרן החירום או על מסלול הפנסיה וההשתלמות.
   חובה לקרוא לו גם לשאלות "למה" על ההצעה ("למה יש לי אג"ח בתמהיל?", "למה 65% מניות?"), לפני שאתה עונה:
   ההסבר חייב להתבסס על reasons ועל האחוזים שהכלי החזיר, לא על הסבר כללי.
+  סך מניות, סך אג"ח וסך כספית נמצאים ב-capital.totals. השתמש בהם כמו שהם, ואל תחבר אחוזים בעצמך
+  (למשל אל תחבר ממשלתי וקונצרני).
 - get_monthly_allocation: איך מתחלק סכום להשקעה החודש: קודם השלמת קרן החירום לכספית, והשאר לפי התמהיל.
   קרא לו כשהמשתמש שואל איך לחלק סכום. אם לא נאמר סכום, הכלי לוקח את ההפקדה החודשית מהפרופיל.
   אם המשתמש נתן אחוז מהנטו ולא סכום ("תחשב 10% מהנטו"), שלח percent_of_net (למשל 10) ולא amount: הקוד מחשב את
@@ -166,6 +182,22 @@ def recent_history(messages_history: list[dict], limit: int = MAX_HISTORY_MESSAG
     return list(messages_history[-limit:]) if limit > 0 else []
 
 
+def fixed_reply_for(user_message: str | None, profile: InvestorProfile) -> str | None:
+    """תשובה קבועה (בלי LLM) לבקשת מכירה או לנכס מחוץ לתחום. None: ההודעה עוברת למודל כרגיל.
+    מכירה: בכל שלב, אם אין בהודעה גם "לא לקנות" / "אל תקנה". נכס מחוץ לתחום: רק אחרי שהראיון הושלם
+    (בראיון "נדל"ן" הוא בדרך כלל תשובה על נכסים אחרים), ולא כשההודעה מתארת נכס של המשתמש או שואלת על ההצעה."""
+    text = " ".join((user_message or "").split())
+    if not text:
+        return None
+    if SELL_REQUEST.search(text) and not NO_BUY_PHRASE.search(text):
+        return OUT_OF_SCOPE_REPLY
+    lowered = text.lower()
+    if (not profile.missing_fields() and any(w in lowered for w in OUT_OF_SCOPE_WORDS)
+            and not any(w in text for w in OUT_OF_SCOPE_EXEMPT)):
+        return OUT_OF_SCOPE_REPLY
+    return None
+
+
 def last_user_message(messages_history: list[dict]) -> str | None:
     """ההודעה האחרונה של המשתמש בשיחה. הכלים מקבלים אותה כדי לבדוק בקוד מה נאמר בפועל."""
     for message in reversed(messages_history):
@@ -198,6 +230,10 @@ def chat_step(messages_history: list[dict], current_profile: InvestorProfile,
     profile_tool_ran = False
     force_proposal = (use_tools and is_proposal_why_question(user_message)
                       and not current_profile.missing_fields())
+    fixed = fixed_reply_for(user_message, current_profile)
+    if fixed is not None:
+        print("[agent] תשובה קבועה בקוד (מחוץ לתחום או מכירה), בלי קריאה ל-LLM")
+        return fixed, current_profile
 
     try:
         for round_no in range(MAX_TOOL_ROUNDS + 1):

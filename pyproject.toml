@@ -10,7 +10,7 @@ requires-python = ">=3.12"
 dependencies = [
     "gradio>=6.31.0",
     "openai>=3.42.1",
-    "pandas<3",
+    "pandas<3",  # לא מיובא בקוד שלנו. gradio תלוי בו, וההגבלה שומרת על pandas 2 שעובד איתו
     "pdfplumber>=0.11.10",
     "pydantic>=2.14.2",
     "python-bidi>=0.6.12",
@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.scripts]
-portfolio-copilot = "portfolio_copilot:main"
+portfolio-copilot = "portfolio_copilot.app:main"  # כמו python -m portfolio_copilot.app
 
 [build-system]
 requires = ["uv_build>=0.13.5,<0.14.0"]

@@ -114,9 +114,12 @@ def _fields_doc() -> str:
     return "\n".join(f'- "{name}": {f.description}' for name, f in Payslip.model_fields.items())
 
 
-def _parse_json(text: str) -> dict:
-    match = re.search(r"\{.*\}", text or "", re.DOTALL)
-    return json.loads(match.group(0) if match else text)
+def extract_json(text: str | None) -> dict:
+    """מחלץ אובייקט JSON מתשובת מודל (גם בתוך ```json או עם טקסט מסביב). strict=False מאפשר ירידות שורה
+    גולמיות בתוך מחרוזות, דבר שמודלים עושים הרבה. משותף לתלוש ולסוכן (agent.final_reply_text)."""
+    text = (text or "").strip()
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    return json.loads(match.group(0) if match else text, strict=False)
 
 
 def extract_payslip(text: str, client, model: str) -> Payslip:
@@ -129,7 +132,7 @@ def extract_payslip(text: str, client, model: str) -> Payslip:
         ],
     )
     try:
-        data = _parse_json(response.choices[0].message.content)
+        data = extract_json(response.choices[0].message.content)
         return Payslip.model_validate({k: v for k, v in data.items() if k in Payslip.model_fields})
     except (json.JSONDecodeError, ValidationError, AttributeError) as e:
         raise ValueError(f"לא הצלחתי לקרוא את התלוש: {e}")

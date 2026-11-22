@@ -2,13 +2,17 @@
 
 קוד טהור: הכל מחושב כאן לפי חוקים קבועים, בלי מודל שפה. ההצעה בסוגי נכסים בלבד, לא מניות או מוצרים.
 כל החוקים מסתמכים רק על InvestorProfile. שדה חסר לא מנוחש: החלק שתלוי בו לא מחושב, והשדה מופיע ב-missing.
+סוגי הנכסים וההגבלות ב-restrictions.py. החלוקה והדיווח החודשי ב-monthly.py.
 """
 import math
 from datetime import date
 
 from pydantic import BaseModel, Field
 
-from portfolio_copilot.schemas import PARTNERED_STATUSES, InvestorProfile
+from portfolio_copilot.restrictions import (ASSET_CLASSES, CORP_BONDS, EQUITY_CLASSES, GOV_BONDS, MONEY_MARKET,
+                                            US_EQUITY, WORLD_EQUITY, apply_restrictions, blocked_classes,
+                                            blocked_groups, emergency_asset_class)
+from portfolio_copilot.schemas import InvestorProfile, format_money
 
 # ---------- קבועים (לשנות כאן) ----------
 # חוק 1: קרן חירום, בחודשי הוצאות
@@ -36,24 +40,7 @@ SHORT_HORIZON_YEARS = 3
 BONDS_SHARE_SHORT = 0.40   # מהלא-מניות, באופק עד 3 שנים. השאר כספית
 BONDS_SHARE_LONG = 0.70    # מהלא-מניות, באופק ארוך יותר. השאר כספית
 
-# מחלקות הנכסים, בסדר ההצגה
-US_EQUITY = 'מדד מניות ארה"ב'
-WORLD_EQUITY = "מדד מניות עולמי"
-GOV_BONDS = 'אג"ח ממשלתי'
-CORP_BONDS = 'אג"ח קונצרני'
-MONEY_MARKET = "כספית"
-ASSET_CLASSES = (US_EQUITY, WORLD_EQUITY, GOV_BONDS, CORP_BONDS, MONEY_MARKET)
-
-# חוק 6: "אל תקנה X" על סוג נכס. החלק שלו עובר לתחליף המותר הראשון ברשימה:
-# קודם הסוג הקרוב באותה קבוצה, ואם כל הקבוצה אסורה, לכספית. כספית אסורה עוברת לאג"ח ממשלתי.
-SUBSTITUTES = {
-    US_EQUITY: (WORLD_EQUITY, MONEY_MARKET, GOV_BONDS, CORP_BONDS),
-    WORLD_EQUITY: (US_EQUITY, MONEY_MARKET, GOV_BONDS, CORP_BONDS),
-    GOV_BONDS: (CORP_BONDS, MONEY_MARKET),
-    CORP_BONDS: (GOV_BONDS, MONEY_MARKET),
-    MONEY_MARKET: (GOV_BONDS, CORP_BONDS),
-}
-EQUITY_CLASSES = (US_EQUITY, WORLD_EQUITY)
+# חוק 6 ("אל תקנה X") וסוגי הנכסים: restrictions.py
 
 # חוק 7: פנסיה והשתלמות
 PENSION_ALL_EQUITY_UNDER_AGE = 40
@@ -106,14 +93,10 @@ class Proposal(BaseModel):
 
 
 # ---------- חוקים ----------
-def _money(x: float) -> str:
-    return f"₪{x:,.0f}"
-
-
 def emergency_target_months(profile: InvestorProfile) -> int:
     """חוק 1: 3 חודשים לשכיר/ה עם בן/בת זוג שמכניסים נטו חיובי. אחרת 6."""
     two_incomes = (profile.employment_status == SALARIED_STATUS
-                   and profile.marital_status in PARTNERED_STATUSES
+                   and profile.is_partnered()
                    and (profile.spouse_monthly_net_income or 0) > 0)
     return EMERGENCY_MONTHS_TWO_INCOMES if two_incomes else EMERGENCY_MONTHS_DEFAULT
 
@@ -156,123 +139,6 @@ def _split(amount: float, pct: dict[str, float]) -> dict[str, float]:
     return parts
 
 
-# ניסוחים נפוצים לכל סוג נכס (אחרי נרמול: מירכאות ישרות, רווח אחד, אותיות לטיניות גדולות)
-ASSET_CLASS_ALIASES = {
-    US_EQUITY: ('מניות ארה"ב', 'מדד ארה"ב', 'מדד אמריקאי', "מניות אמריקאיות", "S&P 500", "S&P500", "SP500"),
-    WORLD_EQUITY: ("מניות עולמיות", "מדד עולמי", "מניות עולם", "MSCI WORLD", "ACWI"),
-    GOV_BONDS: ('אג"ח ממשלתיות', "אגרות חוב ממשלתיות", 'אג"ח מדינה', "ממשלתי", "ממשלתיות"),
-    CORP_BONDS: ('אג"ח קונצרניות', "אגרות חוב קונצרניות", 'אג"ח חברות', "קונצרני", "קונצרניות"),
-    MONEY_MARKET: ("קרן כספית", "קרנות כספיות", "כספיות"),
-}
-
-
-def _normalize_name(text: str) -> str:
-    return " ".join(str(text).replace("״", '"').replace("“", '"').replace("”", '"').upper().split())
-
-
-_ASSET_CLASS_LOOKUP = {_normalize_name(name): k for k, names in ASSET_CLASS_ALIASES.items() for name in (k, *names)}
-
-
-def asset_class_of(item: str) -> str | None:
-    """אם item הוא אחד מחמשת סוגי הנכסים או ניסוח מוכר שלו (ASSET_CLASS_ALIASES), מחזיר את השם הקנוני.
-    בלי תלות ברווחים, בסוג המירכאות ובאותיות גדולות/קטנות. אחרת None."""
-    return _ASSET_CLASS_LOOKUP.get(_normalize_name(item))
-
-
-# הגבלה על קבוצה שלמה: "מניות" חוסם את שני מדדי המניות, "אג"ח" את שני סוגי האג"ח
-EQUITY_GROUP = "מניות"
-BOND_GROUP = 'אג"ח'
-ASSET_GROUPS = {EQUITY_GROUP: EQUITY_CLASSES, BOND_GROUP: (GOV_BONDS, CORP_BONDS)}
-GROUP_ALIASES = {
-    EQUITY_GROUP: ("כל המניות", "שוק המניות", "מדדי מניות"),
-    BOND_GROUP: ("אגח", "אגרות חוב", 'כל האג"ח'),
-}
-_GROUP_LOOKUP = {_normalize_name(name): g for g, names in GROUP_ALIASES.items() for name in (g, *names)}
-
-
-def restriction_target(item: str) -> str | None:
-    """השם הקנוני של מה ש-item חוסם: סוג נכס (ASSET_CLASSES) או קבוצה (ASSET_GROUPS). None לסמל ספציפי."""
-    return asset_class_of(item) or _GROUP_LOOKUP.get(_normalize_name(item))
-
-
-def classes_blocked_by(item: str) -> tuple[str, ...]:
-    """סוגי הנכסים ש-item חוסם: אחד, שניים (קבוצה), או אף אחד (סמל ספציפי כמו TSLA)."""
-    target = restriction_target(item)
-    return ASSET_GROUPS.get(target, (target,)) if target else ()
-
-
-def blocked_classes(profile: InvestorProfile) -> list[str]:
-    """סוגי הנכסים שהמשתמש אמר שלא יקנה, בסדר ASSET_CLASSES. סמלים ספציפיים (כמו TSLA) לא נכללים."""
-    blocked = {k for item in profile.no_buy_symbols for k in classes_blocked_by(item)}
-    return [k for k in ASSET_CLASSES if k in blocked]
-
-
-def substitute_for(asset_class: str, blocked: list[str]) -> str | None:
-    """התחליף המותר הראשון לסוג נכס אסור, או None אם כל התחליפים אסורים."""
-    return next((s for s in SUBSTITUTES[asset_class] if s not in blocked), None)
-
-
-def blocked_groups(profile: InvestorProfile) -> list[str]:
-    """הקבוצות שהמשתמש חסם במלואן ("מניות", "אג"ח"), בסדר ASSET_GROUPS."""
-    targets = {restriction_target(item) for item in profile.no_buy_symbols}
-    return [g for g in ASSET_GROUPS if g in targets]
-
-
-def _group_reason(group: str, moves: dict[str, tuple[str | None, float]]) -> str:
-    """הסבר אחד לקבוצה שנחסמה: אילו סוגים בה, ולאן עבר החלק שלהם."""
-    classes = ASSET_GROUPS[group]
-    head = f"ביקשת לא לקנות {group} ({' ו'.join(classes)})"
-    by_target: dict[str | None, float] = {}
-    for k in classes:
-        target, share = moves[k]
-        by_target[target] = round(by_target.get(target, 0.0) + share, 2)
-    moved = {t: s for t, s in by_target.items() if t is not None and s}
-    stuck = by_target.get(None, 0.0)
-    parts = []
-    if len(moved) == 1:
-        [(t, s)] = moved.items()
-        parts.append(f"ה-{s:g}% שלהן עברו ל{t}")
-    elif moved:
-        parts.append("החלק שלהן עבר כך: " + ", ".join(f"{s:g}% ל{t}" for t, s in moved.items()))
-    if stuck:
-        parts.append(f"{stuck:g}% נשארו בהן כי כל החלופות אסורות גם הן")
-    return head + (", ולכן " + " ו".join(parts) if parts else "") + "."
-
-
-def apply_restrictions(pct: dict[str, float], blocked: list[str],
-                       groups: list[str] | tuple[str, ...] = ()) -> tuple[dict[str, float], list[str]]:
-    """חוק 6: מעביר את האחוז של כל סוג נכס אסור לתחליף שלו. סכום האחוזים לא משתנה.
-    מחזיר (אחוזים חדשים, הסברים). סוג נכס בלי תחליף מותר נשאר במקומו, עם הסבר.
-    groups: קבוצות שנחסמו במלואן. לכל אחת הסבר אחד במקום הסבר לכל סוג נכס בה."""
-    pct, reasons = dict(pct), []
-    moves: dict[str, tuple[str | None, float]] = {}
-    for k in blocked:
-        share = pct[k]
-        target = substitute_for(k, blocked)
-        moves[k] = (target, share)
-        if target is not None:
-            pct[target] = round(pct[target] + share, 2)
-            pct[k] = 0.0
-    in_groups = {k for g in groups for k in ASSET_GROUPS[g]}
-    reasons += [_group_reason(g, moves) for g in groups]
-    for k in blocked:
-        if k in in_groups:
-            continue
-        target, share = moves[k]
-        if target is None:
-            reasons.append(f"ביקשת לא לקנות {k}, אבל כל החלופות שלו אסורות גם הן, ולכן {share:g}% נשארו בו.")
-        elif share:
-            reasons.append(f"ביקשת לא לקנות {k}, ולכן ה-{share:g}% שלו עברו ל{target}.")
-    return pct, reasons
-
-
-def emergency_asset_class(blocked: list[str]) -> str:
-    """לאן הולכת השלמת קרן החירום: כספית, ואם היא אסורה, התחליף שלה. אם אין תחליף מותר, נשארים בכספית."""
-    if MONEY_MARKET not in blocked:
-        return MONEY_MARKET
-    return substitute_for(MONEY_MARKET, blocked) or MONEY_MARKET
-
-
 def pension_track(age: int, equity_pct: float) -> str:
     """חוק 7: מתחת לגיל 40, 100% מנייתי. מגיל 40, לפי אחוז המניות."""
     if age < PENSION_ALL_EQUITY_UNDER_AGE:
@@ -290,8 +156,8 @@ def _emergency(profile: InvestorProfile) -> tuple[int, float, float]:
 def _emergency_reason(profile: InvestorProfile, months: int, target: float) -> str:
     why = ("שכיר/ה ויש הכנסה נוספת של בן/בת הזוג" if months == EMERGENCY_MONTHS_TWO_INCOMES
            else "אין שתי הכנסות קבועות במשק הבית")
-    return (f"קרן חירום: יעד {months} חודשי הוצאות ({why}), כלומר {_money(target)} "
-            f"לפי הוצאות של {_money(profile.monthly_expenses)} בחודש. יש היום {_money(profile.liquid_savings)}.")
+    return (f"קרן חירום: יעד {months} חודשי הוצאות ({why}), כלומר {format_money(target)} "
+            f"לפי הוצאות של {format_money(profile.monthly_expenses)} בחודש. יש היום {format_money(profile.liquid_savings)}.")
 
 
 def _needs(profile: InvestorProfile, missing: list[str]):
@@ -352,11 +218,11 @@ def build_proposal(profile: InvestorProfile, today: date | None = None) -> Propo
             safety.current_months = round(profile.liquid_savings / profile.monthly_expenses, 1)
         reasons.append(_emergency_reason(profile, months, target_amount))
         if shortfall > 0:
-            safety.steps.append(f"להשלים קרן חירום: חסרים {_money(shortfall)}. ההפקדות הראשונות הולכות ל"
+            safety.steps.append(f"להשלים קרן חירום: חסרים {format_money(shortfall)}. ההפקדות הראשונות הולכות ל"
                                 f"{emergency_asset_class(blocked_classes(profile))}.")
             if need("monthly_deposit") and profile.monthly_deposit > 0:
                 safety.months_to_fill = math.ceil(shortfall / profile.monthly_deposit)
-                reasons.append(f"השלמת קרן החירום: {_money(shortfall)} / {_money(profile.monthly_deposit)} בחודש = "
+                reasons.append(f"השלמת קרן החירום: {format_money(shortfall)} / {format_money(profile.monthly_deposit)} בחודש = "
                                f"כ-{safety.months_to_fill} חודשים.")
         else:
             reasons.append("קרן החירום מלאה, ולכן מה שמעבר לה הוא עודף נזיל שאפשר להשקיע.")
@@ -365,8 +231,8 @@ def build_proposal(profile: InvestorProfile, today: date | None = None) -> Propo
         ratio = round(profile.monthly_debt_payments / profile.monthly_net_income, 3)
         safety.debt_ratio = ratio
         safety.reduce_debt_first = ratio > DEBT_TO_INCOME_LIMIT
-        reasons.append(f"חובות: החזר של {_money(profile.monthly_debt_payments)} מתוך נטו של "
-                       f"{_money(profile.monthly_net_income)} הוא {ratio:.0%} (הסף {DEBT_TO_INCOME_LIMIT:.0%}).")
+        reasons.append(f"חובות: החזר של {format_money(profile.monthly_debt_payments)} מתוך נטו של "
+                       f"{format_money(profile.monthly_net_income)} הוא {ratio:.0%} (הסף {DEBT_TO_INCOME_LIMIT:.0%}).")
         if safety.reduce_debt_first:
             safety.steps.append("להקטין חוב לפני השקעה: ההחזר החודשי גבוה מ-30% מהנטו.")
 
@@ -378,8 +244,8 @@ def build_proposal(profile: InvestorProfile, today: date | None = None) -> Propo
         surplus = None
         if target_amount is not None:
             surplus = round(max(0.0, profile.liquid_savings - target_amount), 2)
-            reasons.append(f"עודף נזיל: {_money(profile.liquid_savings)} פחות יעד קרן החירום {_money(target_amount)} "
-                           f"= {_money(surplus)}." + (" אין עודף, ולכן אין פריסה של הון קיים." if not surplus else ""))
+            reasons.append(f"עודף נזיל: {format_money(profile.liquid_savings)} פחות יעד קרן החירום {format_money(target_amount)} "
+                           f"= {format_money(surplus)}." + (" אין עודף, ולכן אין פריסה של הון קיים." if not surplus else ""))
         deposit = profile.monthly_deposit if need("monthly_deposit") else None
         existing_parts = _split(surplus, pct) if surplus else None
         monthly_parts = _split(deposit, pct) if deposit else None
@@ -409,214 +275,9 @@ def build_proposal(profile: InvestorProfile, today: date | None = None) -> Propo
         share = profile.other_assets / sum(known)
         if share >= OTHER_ASSETS_CONCENTRATION:
             notes.append(f'נדל"ן ונכסים אחרים הם {share:.0%} מהנכסים הידועים. זה ריכוז גבוה בנכס אחד. מידע בלבד.')
-            reasons.append(f"ריכוז: {_money(profile.other_assets)} מתוך {_money(sum(known))} נכסים ידועים "
+            reasons.append(f"ריכוז: {format_money(profile.other_assets)} מתוך {format_money(sum(known))} נכסים ידועים "
                            f"= {share:.0%} (הסף {OTHER_ASSETS_CONCENTRATION:.0%}).")
 
     has_safety = safety.emergency_target_months is not None or safety.debt_ratio is not None
     return Proposal(as_of=today, missing=missing, safety=safety if has_safety else None, capital=capital,
                     pension=pension, notes=notes, reasons=reasons)
-
-
-# ---------- חלוקת ההפקדה החודשית (הדיווח החודשי) ----------
-class MonthlyLine(BaseModel):
-    asset_class: str
-    amount: float
-
-
-class MonthlyAllocation(BaseModel):
-    as_of: date
-    deposit: float
-    emergency_amount: float = 0.0          # להשלמת קרן החירום
-    emergency_asset_class: str = MONEY_MARKET  # לאן הולכת השלמת הקרן: כספית, או התחליף שלה אם היא אסורה
-    lines: list[MonthlyLine] | None = None  # השאר לפי התמהיל. None = לא חושב (חסרים נתונים)
-    unallocated: float = 0.0                # מה שלא חולק כי חסר תמהיל
-    missing: list[str] = Field(default_factory=list)
-    reasons: list[str] = Field(default_factory=list)
-
-
-def emergency_deposited(history: list[dict]) -> float:
-    """סך מה שכבר הופנה לקרן החירום בדיווחים חודשיים קודמים (מההיסטוריה השמורה).
-    רשומות ישנות בלי allocation נספרות כ-0."""
-    total = sum(float((e.get("allocation") or {}).get("emergency_amount") or 0) for e in history)
-    return round(total, 2)
-
-
-def allocate_monthly(profile: InvestorProfile, deposit: float, today: date | None = None,
-                     already_in_emergency: float = 0.0) -> MonthlyAllocation:
-    """מחלק הפקדה חודשית: קודם משלימים חוסר בקרן החירום (לכספית, או לתחליף שלה אם היא אסורה),
-    והשאר לפי התמהיל של build_proposal.
-    החוסר = יעד פחות הנזיל בפרופיל פחות מה שכבר הופנה לקרן בדיווחים קודמים (already_in_emergency), ולא פחות מ-0.
-    הסכומים מעוגלים כך שהסכום הכולל שווה בדיוק להפקדה. אין מכירות."""
-    today = today or date.today()
-    if deposit is None or deposit <= 0:
-        raise ValueError("סכום ההשקעה החודש חייב להיות חיובי")
-    deposit = round(float(deposit), 2)
-    already = round(max(0.0, float(already_in_emergency or 0)), 2)
-    missing: list[str] = []
-    reasons: list[str] = []
-    need = _needs(profile, missing)
-
-    emergency = 0.0
-    emergency_class = emergency_asset_class(blocked_classes(profile))
-    if need("monthly_expenses", "liquid_savings"):
-        months, target, profile_shortfall = _emergency(profile)
-        reasons.append(_emergency_reason(profile, months, target))
-        shortfall = round(max(0.0, profile_shortfall - already), 2)
-        if already and profile_shortfall:
-            reasons.append(f"בדיווחים קודמים כבר הופנו {_money(already)} לקרן החירום, "
-                           f"ולכן החוסר שנשאר הוא {_money(shortfall)}.")
-        emergency = round(min(shortfall, deposit), 2)
-        if emergency:
-            reasons.append(f"חסרים {_money(shortfall)} בקרן החירום, ולכן {_money(emergency)} מההפקדה הולכים קודם ל{emergency_class}.")
-        else:
-            reasons.append("קרן החירום מלאה, ולכן כל ההפקדה מתחלקת לפי התמהיל.")
-    else:
-        reasons.append("אי אפשר לבדוק את קרן החירום בלי הוצאות חודשיות וכסף נזיל, ולכן לא הופרש לה סכום.")
-
-    rest = round(deposit - emergency, 2)
-    lines, unallocated = None, 0.0
-    if not _required_ok(profile, need, missing):
-        unallocated = rest
-        if rest:
-            reasons.append(f"{_money(rest)} לא חולקו: חסרים גיל, רמת סיכון מאושרת או אופק.")
-    elif rest:
-        _, _, pct = _mix(profile, reasons)
-        parts = _split(rest, pct)
-        lines = [MonthlyLine(asset_class=k, amount=parts[k]) for k in ASSET_CLASSES]
-        reasons.append(f"{_money(rest)} מתחלקים לפי התמהיל.")
-    else:
-        lines = []
-    return MonthlyAllocation(as_of=today, deposit=deposit, emergency_amount=emergency,
-                             emergency_asset_class=emergency_class, lines=lines,
-                             unallocated=unallocated, missing=missing, reasons=reasons)
-
-
-class PercentDefault(BaseModel):
-    """ברירת המחדל לשדה האחוז בדיווח החודשי. value=None: השדה ריק, ו-explanation אומר למה."""
-    value: float | None = None
-    explanation: str
-
-
-def default_savings_percent(profile: InvestorProfile) -> PercentDefault:
-    """ברירת המחדל לאחוז ההשקעה החודשי מהראיון, עד ספרה עשרונית אחת.
-    נשוי/ידוע בציבור עם הכנסת בן/בת זוג ידועה: monthly_deposit / (monthly_net_income + spouse_monthly_net_income).
-    אחרת: monthly_deposit / monthly_net_income. ריק (עם הסבר) אם חסר נתון, הנטו 0 או שהתוצאה מעל 100%."""
-    deposit, net = profile.monthly_deposit, profile.monthly_net_income
-    combined = partner_fields_shown(profile) and profile.spouse_monthly_net_income is not None
-    base = "הנטו המשותף" if combined else "הנטו שלך"
-    if deposit is None:
-        return PercentDefault(explanation="השדה ריק: בראיון לא נמסר כמה אפשר להפריש בחודש. הזן אחוז או סכום.")
-    if net is None:
-        return PercentDefault(explanation="השדה ריק: בראיון לא נמסרה הכנסה נטו חודשית. הזן אחוז או סכום.")
-    total = round(net + (profile.spouse_monthly_net_income if combined else 0), 2)
-    if total <= 0:
-        return PercentDefault(explanation=f"השדה ריק: {base} בראיון הוא ₪0, ואי אפשר לחשב ממנו אחוז.")
-    pct = round(deposit / total * 100, 1)
-    if pct > 100:
-        return PercentDefault(explanation=f"השדה ריק: ההפקדה מהראיון ({_money(deposit)}) גבוהה מ{base} "
-                                          f"({_money(total)}). הזן אחוז או סכום.")
-    if combined:
-        how = (f"{_money(deposit)} מתוך נטו משותף של {_money(total)} ({_money(net)} שלך + "
-               f"{_money(profile.spouse_monthly_net_income)} של בן/בת הזוג), לפי הראיון. "
-               "האחוז יחול על הנטו המשותף רק אם תזין גם את נטו בן/בת הזוג החודש.")
-    else:
-        how = f"{_money(deposit)} מתוך נטו של {_money(total)}, לפי הראיון."
-    return PercentDefault(value=pct, explanation=how + " אפשר לשנות.")
-
-
-def partner_fields_shown(profile: InvestorProfile) -> bool:
-    """שדות בן/בת הזוג בדיווח החודשי מוצגים רק לנשוי או ידוע בציבור."""
-    return profile.marital_status in PARTNERED_STATUSES
-
-
-class MonthlyReport(BaseModel):
-    """דיווח חודשי אחד. נשמר כ-JSON בהיסטוריה: הערכים שלך, של בן/בת הזוג (אם הוזנו) והסכומים המשותפים."""
-    period: str
-    # שלך
-    net: float
-    pension_contributions: float = 0.0
-    study_fund_contributions: float = 0.0
-    # בן/בת הזוג (None = לא הוזן). לא נשמר בפרופיל
-    partner_net: float | None = None
-    partner_pension: float | None = None
-    partner_study_fund: float | None = None
-    # משותף: שלך + בן/בת הזוג
-    household_net: float
-    total_pension: float
-    total_study_fund: float
-    percent_base: str | None = None        # "נטו שלך" או "נטו משותף", כשהסכום הוזן באחוזים
-    set_aside: float
-    free_to_spend: float
-    total_saved_this_month: float
-    allocation: MonthlyAllocation
-
-
-BASE_OWN = "נטו שלך"
-BASE_COMBINED = "נטו משותף"
-
-
-def _non_negative(*values):
-    if any(v is not None and v < 0 for v in values):
-        raise ValueError("הנטו וההפקדות לפנסיה ולהשתלמות לא יכולים להיות שליליים")
-
-
-def monthly_report(profile: InvestorProfile, net: float, pension: float | None, study_fund: float | None,
-                   amount_mode: str, amount_value: float, today: date | None = None,
-                   partner_net: float | None = None, already_in_emergency: float = 0.0,
-                   partner_pension: float | None = None, partner_study_fund: float | None = None) -> MonthlyReport:
-    """הדיווח החודשי: כמה מושקע החודש (סכום קבוע או אחוז), ואיך הוא מתחלק (allocate_monthly).
-    amount_mode הוא "fixed" (שקלים) או "percent" (25 = 25%). האחוז חל על הנטו שלך,
-    ואם הוזן נטו בן/בת הזוג, על הנטו המשותף. פנסיה והשתלמות מסוכמות לשני בני הזוג. אין מכירות."""
-    today = today or date.today()
-    if not partner_fields_shown(profile):
-        # השדות לא מוצגים למי שלא נשוי/בזוגיות, אז ערכים שנשארו בהם לא נספרים
-        partner_net = partner_pension = partner_study_fund = None
-    if not net or net <= 0:
-        raise ValueError("הזן כמה נכנס נטו החודש")
-    _non_negative(pension, study_fund, partner_net, partner_pension, partner_study_fund)
-    if not amount_value or amount_value <= 0:
-        raise ValueError("הזן כמה להשקיע החודש: סכום בשקלים או אחוז מהנטו")
-    combined = partner_net is not None
-    household = round(net + (partner_net or 0), 2)
-    base_label = BASE_COMBINED if combined else BASE_OWN
-    if amount_mode == "percent":
-        if amount_value > 100:
-            raise ValueError("אחוז ההשקעה לא יכול לעלות על 100%")
-        deposit = round(household * amount_value / 100, 2)
-    elif amount_mode == "fixed":
-        deposit = round(float(amount_value), 2)
-    else:
-        raise ValueError(f"אופן חישוב לא מוכר: {amount_mode}")
-    if deposit > household:
-        raise ValueError(f"הסכום להשקעה ({_money(deposit)}) גבוה מה{base_label} שנכנס החודש ({_money(household)})")
-    allocation = allocate_monthly(profile, deposit, today, already_in_emergency)
-    if amount_mode == "percent":
-        detail = (f"{_money(net)} שלך + {_money(partner_net)} של בן/בת הזוג = {_money(household)}" if combined
-                  else _money(net))
-        allocation.reasons.insert(0, f"סכום להשקעה: {amount_value:g}% מה{base_label} ({detail}) = {_money(deposit)}.")
-    own_pension, own_study = round(pension or 0, 2), round(study_fund or 0, 2)
-    p_pension = round(partner_pension, 2) if partner_pension is not None else None
-    p_study = round(partner_study_fund, 2) if partner_study_fund is not None else None
-    total_pension = round(own_pension + (p_pension or 0), 2)
-    total_study = round(own_study + (p_study or 0), 2)
-    return MonthlyReport(period=today.strftime("%Y-%m"), net=round(net, 2), pension_contributions=own_pension,
-                         study_fund_contributions=own_study,
-                         partner_net=round(partner_net, 2) if combined else None,
-                         partner_pension=p_pension, partner_study_fund=p_study,
-                         household_net=household, total_pension=total_pension, total_study_fund=total_study,
-                         percent_base=base_label if amount_mode == "percent" else None,
-                         set_aside=deposit, free_to_spend=round(household - deposit, 2),
-                         total_saved_this_month=round(deposit + total_pension + total_study, 2), allocation=allocation)
-
-
-def history_row(event: dict) -> dict:
-    """שורה בטבלת ההיסטוריה מדיווח שמור: סכומים משותפים. רשומות ישנות בלי השדות המשותפים נקראות מהשדות שלך."""
-    allocation = event.get("allocation") or {}
-    return {
-        "period": event.get("period") or "",
-        "household_net": event.get("household_net", event.get("net")),
-        "total_pension": event.get("total_pension", event.get("pension_contributions")),
-        "total_study_fund": event.get("total_study_fund", event.get("study_fund_contributions")),
-        "set_aside": event.get("set_aside"),
-        "emergency": allocation.get("emergency_amount") if allocation else None,
-    }

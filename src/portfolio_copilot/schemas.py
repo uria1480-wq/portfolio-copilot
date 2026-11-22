@@ -1,6 +1,11 @@
 from datetime import date
 from typing import Literal, Optional, List
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, field_validator
+
+def format_money(x: float) -> str:
+    """סכום בשקלים לתצוגה, בלי אגורות: ₪12,345. הפונקציה היחידה לעיצוב כסף (הצעה, תמונת מצב, ממשק)."""
+    return f"₪{x:,.0f}"
+
 
 LEGACY_NO_SELL_PREFIX = "לא למכור: "  # הגבלות מגרסה קודמת ("לא מוכר"), שכבר אין להן משמעות
  
@@ -83,8 +88,8 @@ class InvestorProfile(BaseModel):
             self.investment_horizon_years is not None,
         ])
 
-    def spouse_income_required(self) -> bool:
-        """הכנסת בן/בת הזוג נשאלת רק לנשוי או ידוע בציבור."""
+    def is_partnered(self) -> bool:
+        """נשוי או ידוע בציבור. רק אז נשאלת הכנסת בן/בת הזוג ומוצגים שדות בן/בת הזוג בדיווח החודשי."""
         return self.marital_status in PARTNERED_STATUSES
 
     def missing_fields(self) -> list[str]:
@@ -94,7 +99,7 @@ class InvestorProfile(BaseModel):
         if self.age is None and self.life_stage is None:
             missing.append("age")
         for field in INTERVIEW_FIELDS:
-            if field == "spouse_monthly_net_income" and not self.spouse_income_required():
+            if field == "spouse_monthly_net_income" and not self.is_partnered():
                 continue
             if getattr(self, field) is None and field not in self.unknown_fields:
                 missing.append(field)
@@ -104,10 +109,6 @@ class InvestorProfile(BaseModel):
             missing.append("risk_confirmed")
         return missing
 
-
-LIST_FIELDS = ("relevant_vehicles", "restrictions")
-# שדות שמשתנים רק דרך כלי ייעודי (add_restriction, update_profile), ולא דרך ה-JSON החופשי של המודל
-PROTECTED_FIELDS = ("no_buy_symbols", "unknown_fields")
 
 LIFE_STAGES = ("נוער", "סטודנט", "משפחה צעירה", "לקראת פרישה", "פנסיונר")
 RISK_LEVELS = ("שמרני", "מאוזן", "אגרסיבי")
@@ -313,43 +314,3 @@ def apply_profile_update(current: InvestorProfile, patch: dict,
             accepted["risk_confirmed"] = clean
 
     return InvestorProfile(**data), accepted, rejected
- 
- 
-def merge_profile(current: InvestorProfile, patch: dict) -> InvestorProfile:
-    """ממזג עדכון מהמודל לפרופיל הקיים בלי לאבד מידע.
- 
-    - שדה ריק (null) לא דורס ערך קיים.
-    - רשימות (מגבלות, מכשירים) מתאחדות ולא מוחלפות.
-    - ערך שלא עובר ולידציה (למשל "בינוני" כרמת סיכון) נזרק, והערך הקודם נשמר.
-    - שינוי של רמת הסיכון מאפס את האישור, אלא אם המשתמש אישר באותו תור.
-    """
-    patch = patch if isinstance(patch, dict) else {}
-    data = current.model_dump()
-    old_risk = data["recommended_risk_level"]
- 
-    for key, value in patch.items():
-        if key not in data or value is None or key in PROTECTED_FIELDS:
-            continue
-        if key in LIST_FIELDS:
-            if isinstance(value, str):
-                value = [value]
-            if not isinstance(value, list):
-                continue
-            items = [str(x).strip() for x in value if str(x).strip()]
-            data[key] = list(dict.fromkeys([*data[key], *items]))
-        else:
-            data[key] = value
- 
-    if data["recommended_risk_level"] != old_risk and patch.get("risk_confirmed") is not True:
-        data["risk_confirmed"] = False
- 
-    for _ in range(len(data) + 1):
-        try:
-            return InvestorProfile(**data)
-        except ValidationError as e:
-            bad = {err["loc"][0] for err in e.errors() if err["loc"]}
-            if not bad:
-                break
-            for field in bad:
-                data[field] = getattr(current, field)
-    return current

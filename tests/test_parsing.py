@@ -74,3 +74,21 @@ def test_empty_reply_gets_generic_message(monkeypatch):
     monkeypatch.setattr(agent, "client", fake_client(None))
     reply, _ = agent.chat_step([{"role": "user", "content": "היי"}], InvestorProfile())
     assert reply == agent.FALLBACK_REPLY
+
+
+def test_agent_and_payslip_share_one_json_parser():
+    from portfolio_copilot import documents
+
+    assert agent.extract_json is documents.extract_json and not hasattr(documents, "_parse_json")
+    assert documents.extract_json('לפני {"a": "שורה\nשנייה"} אחרי') == {"a": "שורה\nשנייה"}
+
+
+def test_empty_model_content_is_a_json_error_not_a_crash():
+    import json
+
+    import pytest
+    from portfolio_copilot import documents
+
+    with pytest.raises(json.JSONDecodeError):
+        documents.extract_json(None)
+

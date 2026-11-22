@@ -1,20 +1,25 @@
 import argparse
 import inspect
+import os
 import sys
 
 import gradio as gr
 
 from portfolio_copilot.agent import chat_step, read_payslip
 from portfolio_copilot.db import ALL_HISTORY, Store
-from portfolio_copilot.proposal import (build_proposal, default_savings_percent, emergency_deposited, monthly_report,
-                                        partner_fields_shown)
+from portfolio_copilot.monthly import default_savings_percent, emergency_deposited, monthly_report
+from portfolio_copilot.proposal import build_proposal
 from portfolio_copilot.schemas import InvestorProfile
 from portfolio_copilot.situation import load_situation
-from portfolio_copilot.ui import (CSS, banner_html, hero_html, intake_progress_html,
+from portfolio_copilot.ui import (CSS, banner_html, hero_html, intake_progress_html, payslip_status_html,
                                   monthly_report_html, profile_html, proposal_html, salary_history_html,
                                   situation_html, stages_html, supported)
 
 USER_NAME = "demo"  # בהמשך אפשר להחליף בהתחברות אמיתית; כל הקוד כבר עובד לפי user_id
+# --share: הסיסמה (וגם שם המשתמש, אם הוגדר) נקראים מ-.env ולא כתובים בקוד
+SHARE_PASSWORD_ENV = "SHARE_PASSWORD"
+SHARE_USERNAME_ENV = "SHARE_USERNAME"
+DEFAULT_SHARE_USERNAME = "family"
 NOCHANGE = getattr(gr, "skip", gr.update)
 SUGGESTIONS = [
     "מה ההצעה שלי ולמה?",
@@ -114,7 +119,7 @@ def make_monthly_defaults_handler(store: Store, user_id: int):
     def defaults():
         profile = store.load_profile(user_id)
         pct = default_savings_percent(profile)
-        shown = partner_fields_shown(profile)
+        shown = profile.is_partnered()
         return (gr.update(value=PERCENT_MODE), gr.update(value=pct.value, info=pct.explanation),
                 *[gr.update(visible=shown) for _ in range(PARTNER_COMPONENTS)])
 
@@ -140,39 +145,31 @@ def make_monthly_handler(store: Store, user_id: int):
 
 
 def _read_payslip(store: Store, user_id: int, file):
-    """קורא תלוש בקוד הקיים ושומר אותו. מחזיר (summary, None) או (None, הודעת שגיאה)."""
+    """קורא תלוש בקוד הקיים ושומר אותו. מחזיר (המסמך שנקרא, None) או (None, הודעת שגיאה)."""
     try:
         doc = read_payslip(getattr(file, "name", file))
     except Exception as e:
         return None, banner_html(f"❌ {e}")
     store.save_document(user_id, doc)
-    return doc["summary"], None
+    return doc, None
 
 
-def make_payslip_handler(store: Store, user_id: int):
-    """העלאת תלוש (אופציונלי): נקרא בקוד הקיים, נשמר, וממלא את שלושת השדות. אפשר לתקן לפני החישוב."""
+PAYSLIP_OK = "✅ התלוש נקרא והשדות מולאו. בדוק אותם לפני החישוב."
+PARTNER_PAYSLIP_OK = "✅ התלוש של בן/בת הזוג נקרא. האחוז יחושב על הנטו המשותף."
+
+
+def make_payslip_handler(store: Store, user_id: int, success_message: str = PAYSLIP_OK):
+    """העלאת תלוש (אופציונלי), שלך או של בן/בת הזוג (success_message=PARTNER_PAYSLIP_OK): נקרא, נשמר,
+    וממלא נטו, פנסיה והשתלמות. אפשר לתקן לפני החישוב. התלוש לא משנה את הפרופיל."""
     def upload(file):
         if not file:
             return NOCHANGE(), NOCHANGE(), NOCHANGE(), ""
-        s, error = _read_payslip(store, user_id, file)
+        doc, error = _read_payslip(store, user_id, file)
         if error:
             return NOCHANGE(), NOCHANGE(), NOCHANGE(), error
+        s = doc["summary"]
         return (s.get("net_to_bank"), s.get("pension_monthly_total"), s.get("study_fund_monthly_total"),
-                banner_html("✅ התלוש נקרא והשדות מולאו. בדוק אותם לפני החישוב."))
-
-    return upload
-
-
-def make_partner_payslip_handler(store: Store, user_id: int):
-    """תלוש שני (בן/בת הזוג, אופציונלי): אותו קורא תלוש, ממלא נטו, פנסיה והשתלמות של בן/בת הזוג. לא נשמר בפרופיל."""
-    def upload(file):
-        if not file:
-            return NOCHANGE(), NOCHANGE(), NOCHANGE(), ""
-        s, error = _read_payslip(store, user_id, file)
-        if error:
-            return NOCHANGE(), NOCHANGE(), NOCHANGE(), error
-        return (s.get("net_to_bank"), s.get("pension_monthly_total"), s.get("study_fund_monthly_total"),
-                banner_html("✅ התלוש של בן/בת הזוג נקרא. האחוז יחושב על הנטו המשותף."))
+                payslip_status_html(success_message, doc.get("warnings")))
 
     return upload
 
@@ -189,10 +186,6 @@ def make_chat_handler(store: Store, user_id: int):
 
 
 # ---------- בניית הממשק ----------
-def _choice(value, choices):
-    return value if value in choices else None
-
-
 def build_demo(store: Store, user_id: int):
     """בונה את הממשק. מחזיר (demo, launch_kwargs)."""
     theme = gr.themes.Soft(primary_hue="indigo", neutral_hue="slate",
@@ -253,7 +246,7 @@ def build_demo(store: Store, user_id: int):
                     pension_m_in = gr.Number(label="הפקדה לפנסיה (₪)")
                     study_m_in = gr.Number(label="הפקדה להשתלמות (₪)")
                 monthly_profile = store.load_profile(user_id)
-                partner_shown = partner_fields_shown(monthly_profile)
+                partner_shown = monthly_profile.is_partnered()
                 default_pct = default_savings_percent(monthly_profile)
                 partner_slip_in = gr.File(label="תלוש של בן/בת הזוג PDF (לא חובה)", file_types=[".pdf"],
                                           visible=partner_shown)
@@ -309,7 +302,7 @@ def build_demo(store: Store, user_id: int):
                                  partner_pension_in, partner_study_in],
                          outputs=salary_display).then(
             fn=refresh, inputs=None, outputs=[picture_display, stages_display])
-        partner_slip_in.upload(fn=make_partner_payslip_handler(store, user_id), inputs=partner_slip_in,
+        partner_slip_in.upload(fn=make_payslip_handler(store, user_id, PARTNER_PAYSLIP_OK), inputs=partner_slip_in,
                                outputs=[partner_net_in, partner_pension_in, partner_study_in, partner_status])
         payslip_in.upload(fn=make_payslip_handler(store, user_id), inputs=payslip_in,
                           outputs=[net_in, pension_m_in, study_m_in, payslip_status])
@@ -328,7 +321,22 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Portfolio Copilot")
     parser.add_argument("--fresh", action="store_true",
                         help="מסד נתונים בזיכרון בלבד: כל הרצה מתחילה נקייה ושום דבר לא נשמר ב-data/portfolio.db")
+    parser.add_argument("--share", action="store_true",
+                        help=f"קישור ציבורי (Gradio share) עם סיסמה מ-{SHARE_PASSWORD_ENV}. בלי הדגל: מקומי בלבד")
     return parser.parse_args(argv)
+
+
+def share_settings(share: bool, env=None) -> dict:
+    """הגדרות השיתוף ל-launch. בלי --share: מקומי בלבד. עם --share: שם משתמש וסיסמה ממשתני סביבה
+    (.env נטען ב-agent.py). אין סיסמה -> ValueError, והאפליקציה לא עולה."""
+    if not share:
+        return {"share": False}
+    env = os.environ if env is None else env
+    password = (env.get(SHARE_PASSWORD_ENV) or "").strip()
+    if not password:
+        raise ValueError(f"--share דורש סיסמה: הגדר {SHARE_PASSWORD_ENV} ב-.env. האפליקציה לא הופעלה.")
+    username = (env.get(SHARE_USERNAME_ENV) or "").strip() or DEFAULT_SHARE_USERNAME
+    return {"share": True, "auth": (username, password)}
 
 
 def open_store(fresh: bool) -> Store:
@@ -346,13 +354,17 @@ def utf8_console(*streams) -> None:
 def main(argv=None):
     utf8_console()
     args = parse_args(argv)
+    try:
+        sharing = share_settings(args.share)
+    except ValueError as e:
+        raise SystemExit(f"[app] {e}")
     store = open_store(args.fresh)
     if args.fresh:
         print("[app] --fresh: מסד נתונים בזיכרון. שום דבר מההרצה הזו לא יישמר.")
     user_id = store.get_or_create_user(USER_NAME)
 
     demo, launch_kwargs = build_demo(store, user_id)
-    launch_kwargs.update(share=True, auth=("family", "u12345"))
+    launch_kwargs.update(sharing)
     demo.launch(**launch_kwargs)
 
 

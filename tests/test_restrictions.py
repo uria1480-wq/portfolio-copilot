@@ -5,9 +5,10 @@ import pytest
 
 from portfolio_copilot.agent_tools import run_profile_tool, run_tool
 from portfolio_copilot.db import Store
-from portfolio_copilot.proposal import (ASSET_CLASSES, ASSET_GROUPS, CORP_BONDS, GOV_BONDS, MONEY_MARKET, US_EQUITY,
-                                        WORLD_EQUITY, allocate_monthly, asset_class_of, build_proposal, classes_blocked_by,
-                                        restriction_target)
+from portfolio_copilot.monthly import allocate_monthly
+from portfolio_copilot.proposal import build_proposal
+from portfolio_copilot.restrictions import (ASSET_CLASSES, ASSET_GROUPS, CORP_BONDS, GOV_BONDS, MONEY_MARKET, US_EQUITY,
+                                            WORLD_EQUITY, asset_class_of, classes_blocked_by, restriction_target)
 from portfolio_copilot.schemas import InvestorProfile
 
 TODAY = date(2026, 11, 22)

@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 
 from portfolio_copilot import proposal as proposal_module
-from portfolio_copilot.proposal import (CORP_BONDS, GOV_BONDS, MONEY_MARKET, US_EQUITY, WORLD_EQUITY, build_proposal,
-                                        equity_percent)
+from portfolio_copilot.proposal import build_proposal, equity_percent
+from portfolio_copilot.restrictions import CORP_BONDS, GOV_BONDS, MONEY_MARKET, US_EQUITY, WORLD_EQUITY
 from portfolio_copilot.schemas import InvestorProfile
 
 TODAY = date(2026, 11, 19)
@@ -193,12 +193,23 @@ def test_reasons_cite_the_numbers():
 
 
 # ---------- בלי LLM ----------
-def test_module_does_not_import_openai():
-    tree = ast.parse(Path(proposal_module.__file__).read_text(encoding="utf-8"))
-    imported = {alias.name.split(".")[0] for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
-    imported |= {(node.module or "").split(".")[0] for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
-    assert "openai" not in imported and "portfolio_copilot.agent" not in {
-        node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
+def _imports(module_name: str) -> set[str]:
+    tree = ast.parse((Path(proposal_module.__file__).parent / f"{module_name}.py").read_text(encoding="utf-8"))
+    names = {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
+    return names | {node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)}
+
+
+@pytest.mark.parametrize("module_name", ["proposal", "restrictions", "monthly"])
+def test_module_does_not_import_openai(module_name):
+    imported = _imports(module_name)
+    assert not any(m.split(".")[0] == "openai" for m in imported) and "portfolio_copilot.agent" not in imported
+
+
+def test_split_modules_depend_one_way():
+    """restrictions <- proposal <- monthly. בלי יבוא מעגלי."""
+    assert {m for m in _imports("restrictions") if m.startswith("portfolio_copilot")} == {"portfolio_copilot.schemas"}
+    assert "portfolio_copilot.monthly" not in _imports("proposal")
+    assert {"portfolio_copilot.proposal", "portfolio_copilot.restrictions"} <= _imports("monthly")
 
 
 # ---------- ממשק ----------
@@ -241,7 +252,7 @@ def test_app_handler_reads_saved_profile(monkeypatch):
 
 
 # ---------- allocate_monthly ----------
-from portfolio_copilot.proposal import allocate_monthly  # noqa: E402
+from portfolio_copilot.monthly import allocate_monthly  # noqa: E402
 
 
 def total(r):
@@ -305,7 +316,7 @@ def test_deposit_must_be_positive():
 
 
 # ---------- monthly_report ----------
-from portfolio_copilot.proposal import monthly_report  # noqa: E402
+from portfolio_copilot.monthly import monthly_report  # noqa: E402
 
 
 def test_monthly_report_fixed_and_percent():
@@ -329,7 +340,7 @@ def test_monthly_report_rejects_bad_input(args, message):
 
 
 # ---------- ברירת מחדל לאחוז (משימה 3) ----------
-from portfolio_copilot.proposal import default_savings_percent, emergency_deposited, partner_fields_shown  # noqa: E402
+from portfolio_copilot.monthly import default_savings_percent, emergency_deposited  # noqa: E402
 
 
 @pytest.mark.parametrize("deposit, net, expected", [
@@ -425,9 +436,9 @@ def test_emergency_deposited_sums_history_and_ignores_old_records():
 
 # ---------- נשואים / בזוגיות (משימה 5) ----------
 def test_partner_fields_only_for_partnered():
-    assert partner_fields_shown(person(marital_status="נשוי")) and partner_fields_shown(person(marital_status="ידוע בציבור"))
+    assert person(marital_status="נשוי").is_partnered() and person(marital_status="ידוע בציבור").is_partnered()
     for status in ("רווק", "גרוש", "אלמן", None):
-        assert not partner_fields_shown(person(marital_status=status))
+        assert not person(marital_status=status).is_partnered()
 
 
 def test_married_percent_on_own_net_without_partner_net():

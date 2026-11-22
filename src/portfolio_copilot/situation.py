@@ -4,7 +4,7 @@
 לא קורא אחזקות, מחירים, דוחות קרנות או תלושים, ולא את תשובות הטופס הישן או את ההזנה הידנית הישנה.
 הפרופיל לא משתנה: מה שנוסף מהדיווחים מוצג בנפרד, עם מקור "דיווח חודשי".
 """
-from portfolio_copilot.schemas import InvestorProfile
+from portfolio_copilot.schemas import InvestorProfile, format_money
 
 SOURCE_INTERVIEW = "ראיון"
 SOURCE_MONTHLY = "דיווח חודשי"
@@ -43,7 +43,7 @@ def format_value(kind: str, value) -> str:
     if value is None:
         return EMPTY
     if kind == "money":
-        return f"₪{value:,.0f}"
+        return format_money(value)
     if kind == "years":
         return f"{value} שנים"
     return str(value)
@@ -90,7 +90,7 @@ def build_situation(profile: InvestorProfile, history: list[dict] | None = None)
     for title, fields in SECTIONS:
         rows = []
         for key, label, kind in fields:
-            if key == "spouse_monthly_net_income" and not profile.spouse_income_required():
+            if key == "spouse_monthly_net_income" and not profile.is_partnered():
                 continue
             value = getattr(profile, key)
             if value is not None:

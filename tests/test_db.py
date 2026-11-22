@@ -1,5 +1,5 @@
 from portfolio_copilot.db import Store
-from portfolio_copilot.schemas import InvestorProfile, merge_profile
+from portfolio_copilot.schemas import InvestorProfile
 
 
 def test_user_is_created_once():
@@ -11,8 +11,8 @@ def test_user_is_created_once():
 def test_profile_roundtrip_keeps_restrictions_and_confirmation():
     s = Store(":memory:")
     uid = s.get_or_create_user("uria")
-    p = merge_profile(InvestorProfile(), {"age": 25, "restrictions": ["לא מוכר מניית צים"],
-                                          "recommended_risk_level": "מאוזן", "risk_confirmed": True})
+    p = InvestorProfile(age=25, restrictions=["לא מוכר מניית צים"], recommended_risk_level="מאוזן",
+                        risk_confirmed=True)
     s.save_profile(uid, p)
     loaded = s.load_profile(uid)
     assert loaded == p and loaded.risk_confirmed

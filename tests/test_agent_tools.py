@@ -3,7 +3,8 @@ from datetime import date
 
 from portfolio_copilot.agent_tools import run_tool
 from portfolio_copilot.db import Store
-from portfolio_copilot.proposal import allocate_monthly, build_proposal
+from portfolio_copilot.monthly import allocate_monthly
+from portfolio_copilot.proposal import build_proposal
 from portfolio_copilot.schemas import InvestorProfile
 
 TODAY = date(2026, 11, 22)

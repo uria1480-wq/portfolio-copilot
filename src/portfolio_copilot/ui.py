@@ -2,8 +2,9 @@
 import html
 import inspect
 
-from portfolio_copilot.proposal import MonthlyReport, Proposal, history_row
-from portfolio_copilot.schemas import InvestorProfile
+from portfolio_copilot.monthly import MonthlyReport, history_row
+from portfolio_copilot.proposal import Proposal
+from portfolio_copilot.schemas import InvestorProfile, format_money
 
 
 def esc(value) -> str:
@@ -83,6 +84,8 @@ footer { display: none !important; }
 .pc-banner-ok { background: var(--pc-ok-soft); color: var(--pc-ok); }
 .pc-banner-err { background: var(--pc-err-soft); color: var(--pc-err); }
 .pc-banner-info { background: var(--pc-primary-soft); color: var(--pc-primary); }
+.pc-banner-warn { background: var(--pc-warn-soft); color: var(--pc-warn); }
+.pc-banner-warn ul { margin: 6px 0 0; padding-inline-start: 20px; }
 
 .pc-table { width: 100%; border-collapse: collapse; font-size: 15px; }
 .pc-table th { text-align: right; font-size: 12.5px; color: var(--pc-muted); font-weight: 500; padding: 6px 8px; border-bottom: 1px solid var(--pc-line); }
@@ -133,8 +136,16 @@ def banner_html(prefix: str) -> str:
     return f'<div class="pc-banner pc-banner-{kind}">{esc(text)}</div>'
 
 
-def _money(x) -> str:
-    return f"₪{x:,.0f}"
+PAYSLIP_WARNINGS_TITLE = "⚠️ בדיקת החשבון בתלוש מצאה פערים. בדוק את השדות ותקן לפני החישוב:"
+
+
+def payslip_status_html(message: str, warnings: list[str] | None = None) -> str:
+    """הודעת הקריאה של תלוש, ומתחתיה האזהרות של בדיקת החשבון (check_payslip), אם יש."""
+    out = banner_html(message)
+    if warnings:
+        items = "".join(f"<li>{esc(w)}</li>" for w in warnings)
+        out += f'<div class="pc-banner pc-banner-warn">{esc(PAYSLIP_WARNINGS_TITLE)}<ul>{items}</ul></div>'
+    return out
 
 
 def _field(label: str, inner: str, full: bool = False) -> str:
@@ -169,9 +180,9 @@ def profile_html(profile: InvestorProfile) -> str:
 
     amounts = []
     if profile.initial_amount:
-        amounts.append(f"ראשוני {_money(profile.initial_amount)}")
+        amounts.append(f"ראשוני {format_money(profile.initial_amount)}")
     if profile.monthly_deposit:
-        amounts.append(f"חודשי {_money(profile.monthly_deposit)}")
+        amounts.append(f"חודשי {format_money(profile.monthly_deposit)}")
     amount_html = _value(" · ".join(amounts)) if amounts else _value("—", muted=True)
 
     if profile.needs_cashflow is None:
@@ -275,7 +286,7 @@ def intake_progress_html(profile: InvestorProfile) -> str:
         f'<span class="pc-chip {"pc-chip-wait" if key in missing else "pc-chip-ok"}">'
         f'{"◯" if key in missing else "✓"} {esc(label)}</span>'
         for key, label in PROFILE_FIELD_LABELS.items()
-        if key != "spouse_monthly_net_income" or profile.spouse_income_required())
+        if key != "spouse_monthly_net_income" or profile.is_partnered())
     return head + ('<div class="pc-card"><div class="pc-card-head"><h3>התקדמות ההיכרות</h3>' + status + "</div>"
                    f'<div class="pc-chips">{chips}</div></div>')
 
@@ -283,7 +294,7 @@ def intake_progress_html(profile: InvestorProfile) -> str:
 def situation_html(view: dict, prefix: str = "") -> str:
     """מציג את תמונת המצב של שלב 2 (situation.build_situation). הערכים והמקורות כבר מחושבים שם."""
     head = banner_html(prefix)
-    total = (f'<div class="pc-total">{_money(view["total"])}</div>' if view.get("total") is not None
+    total = (f'<div class="pc-total">{format_money(view["total"])}</div>' if view.get("total") is not None
              else '<div class="pc-empty">עדיין אין נכסים ידועים לסיכום.</div>')
     body = ""
     for section in view["sections"]:
@@ -305,7 +316,7 @@ def situation_html(view: dict, prefix: str = "") -> str:
 
 # --- קבל הצעה (proposal.build_proposal) ---
 def _amount(x) -> str:
-    return _money(x) if x is not None else "—"
+    return format_money(x) if x is not None else "—"
 
 
 def _card(title: str, inner: str) -> str:
@@ -375,31 +386,31 @@ def monthly_report_html(r: MonthlyReport) -> str:
     a = r.allocation
     rows = []
     if a.emergency_amount:
-        rows.append(f'<tr><td>קרן חירום ({esc(a.emergency_asset_class)})</td><td>{_money(a.emergency_amount)}</td></tr>')
-    rows += [f'<tr><td>{esc(line.asset_class)}</td><td>{_money(line.amount)}</td></tr>'
+        rows.append(f'<tr><td>קרן חירום ({esc(a.emergency_asset_class)})</td><td>{format_money(a.emergency_amount)}</td></tr>')
+    rows += [f'<tr><td>{esc(line.asset_class)}</td><td>{format_money(line.amount)}</td></tr>'
              for line in (a.lines or []) if line.amount]
     if a.unallocated:
-        rows.append(f'<tr><td>לא חולק (חסרים נתונים)</td><td>{_money(a.unallocated)}</td></tr>')
+        rows.append(f'<tr><td>לא חולק (חסרים נתונים)</td><td>{format_money(a.unallocated)}</td></tr>')
     table = ('<table class="pc-table"><tr><th>לאן</th><th>סכום</th></tr>' + "".join(rows) + "</table>")
     base = (_field("האחוז חושב על", _value(r.percent_base)) if r.percent_base else "")
     has_partner = any(v is not None for v in (r.partner_net, r.partner_pension, r.partner_study_fund))
     partner = ""
     if has_partner:
         partner = (_field("נטו: שלך · בן/בת הזוג · משותף",
-                          _value(f"{_money(r.net)} · {_amount(r.partner_net)} · {_money(r.household_net)}"))
+                          _value(f"{format_money(r.net)} · {_amount(r.partner_net)} · {format_money(r.household_net)}"))
                    + _field("פנסיה: שלך · בן/בת הזוג · סה\"כ",
-                            _value(f"{_money(r.pension_contributions)} · {_amount(r.partner_pension)} · {_money(r.total_pension)}"))
+                            _value(f"{format_money(r.pension_contributions)} · {_amount(r.partner_pension)} · {format_money(r.total_pension)}"))
                    + _field("השתלמות: שלך · בן/בת הזוג · סה\"כ",
-                            _value(f"{_money(r.study_fund_contributions)} · {_amount(r.partner_study_fund)} · {_money(r.total_study_fund)}")))
-    summary = (f'<div class="pc-grid" style="margin-top:12px">{base}{partner}{_field("נשאר להוצאות", _value(_money(r.free_to_spend)))}'
-               f'{_field("הפקדות לפנסיה ולהשתלמות", _value(f"{_money(r.total_pension)} · {_money(r.total_study_fund)}"))}'
-               f'{_field("סך החיסכון החודש", _value(_money(r.total_saved_this_month)))}</div>')
+                            _value(f"{format_money(r.study_fund_contributions)} · {_amount(r.partner_study_fund)} · {format_money(r.total_study_fund)}")))
+    summary = (f'<div class="pc-grid" style="margin-top:12px">{base}{partner}{_field("נשאר להוצאות", _value(format_money(r.free_to_spend)))}'
+               f'{_field("הפקדות לפנסיה ולהשתלמות", _value(f"{format_money(r.total_pension)} · {format_money(r.total_study_fund)}"))}'
+               f'{_field("סך החיסכון החודש", _value(format_money(r.total_saved_this_month)))}</div>')
     missing = ""
     if a.missing:
         missing = ('<div class="pc-section">מה חסר בפרופיל</div>'
                    + _bullets([PROFILE_FIELD_LABELS.get(m, m) for m in a.missing]))
     why = '<div class="pc-section">למה</div>' + _bullets(a.reasons)
     return (f'<div class="pc-card"><div class="pc-card-head"><h3>דיווח חודשי: {esc(r.period)}</h3>'
-            f'<span class="pc-chip pc-chip-idle">נטו {esc(_money(r.household_net))}</span></div>'
+            f'<span class="pc-chip pc-chip-idle">נטו {esc(format_money(r.household_net))}</span></div>'
             '<div class="pc-empty">הצעה לאישור, בסוגי נכסים. לא בוצע כלום, ואין הצעות מכירה.</div>'
-            f'<div class="pc-section">מה לעשות עם {esc(_money(r.set_aside))}</div>{table}{summary}{missing}{why}</div>')
+            f'<div class="pc-section">מה לעשות עם {esc(format_money(r.set_aside))}</div>{table}{summary}{missing}{why}</div>')

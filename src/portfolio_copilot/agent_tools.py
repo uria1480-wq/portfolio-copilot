@@ -3,8 +3,9 @@
 from datetime import date
 
 from portfolio_copilot.db import ALL_HISTORY
-from portfolio_copilot.proposal import (ASSET_CLASSES, ASSET_GROUPS, allocate_monthly, build_proposal, classes_blocked_by,
-                                        emergency_deposited, restriction_target)
+from portfolio_copilot.monthly import allocate_monthly, emergency_deposited
+from portfolio_copilot.proposal import build_proposal
+from portfolio_copilot.restrictions import ASSET_CLASSES, ASSET_GROUPS, classes_blocked_by, restriction_target
 from portfolio_copilot.schemas import (EMPLOYMENT_OPTIONS, LIFE_STAGES, MARITAL_OPTIONS, NONE_ALLOWED, RISK_LEVELS,
                                        UNKNOWN_ALLOWED, InvestorProfile, apply_profile_update)
 

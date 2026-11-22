@@ -170,6 +170,46 @@ def test_fresh_flag_uses_memory_store_and_default_uses_file(monkeypatch):
     appmod.main([])
     assert paths == [":memory:", "data/portfolio.db"] and len(launched) == 2
     assert appmod.parse_args(["--fresh"]).fresh and not appmod.parse_args([]).fresh
+    assert all(kw["share"] is False and "auth" not in kw for kw in launched)  # ברירת מחדל: מקומי בלבד
+
+
+def fake_launch(monkeypatch):
+    launched = []
+    monkeypatch.setattr(appmod, "Store", lambda path="data/portfolio.db": Store(":memory:"))
+    monkeypatch.setattr(appmod, "build_demo",
+                        lambda store, uid: (SimpleNamespace(launch=lambda **kw: launched.append(kw)), {}))
+    return launched
+
+
+def test_share_flag_reads_password_and_username_from_env(monkeypatch):
+    launched = fake_launch(monkeypatch)
+    monkeypatch.setenv("SHARE_PASSWORD", "from-env-secret")
+    monkeypatch.setenv("SHARE_USERNAME", "team")
+    appmod.main(["--fresh", "--share"])
+    assert launched == [{"share": True, "auth": ("team", "from-env-secret")}]
+
+
+def test_share_without_username_uses_default(monkeypatch):
+    monkeypatch.delenv("SHARE_USERNAME", raising=False)
+    assert appmod.share_settings(True, {"SHARE_PASSWORD": "x"}) == {"share": True, "auth": ("family", "x")}
+    assert appmod.share_settings(False, {"SHARE_PASSWORD": "x"}) == {"share": False}
+
+
+@pytest.mark.parametrize("password", [None, "", "   "])
+def test_share_without_password_refuses_to_start(monkeypatch, password):
+    launched = fake_launch(monkeypatch)
+    if password is None:
+        monkeypatch.delenv("SHARE_PASSWORD", raising=False)
+    else:
+        monkeypatch.setenv("SHARE_PASSWORD", password)
+    with pytest.raises(SystemExit) as e:
+        appmod.main(["--fresh", "--share"])
+    assert "SHARE_PASSWORD" in str(e.value) and launched == []
+
+
+def test_no_password_is_written_in_app_code():
+    source = open(appmod.__file__, encoding="utf-8").read()
+    assert "u12345" not in source and "share=True" not in source
 
 
 def test_fresh_store_starts_clean_every_time():
@@ -332,14 +372,14 @@ def test_partner_payslip_fills_partner_net_and_rejects_non_payslip(monkeypatch):
     slip = {"doc_type": "payslip", "period": "2026-10", "data": {}, "warnings": [],
             "summary": {"net_to_bank": 15500.0, "pension_monthly_total": 1900.0, "study_fund_monthly_total": 700.0}}
     monkeypatch.setattr(appmod, "read_payslip", lambda path: slip)
-    net, pension, study, status = appmod.make_partner_payslip_handler(store, uid)("partner.pdf")
+    net, pension, study, status = appmod.make_payslip_handler(store, uid, appmod.PARTNER_PAYSLIP_OK)("partner.pdf")
     assert (net, pension, study) == (15500.0, 1900.0, 700.0) and "בן/בת הזוג נקרא" in status
 
     def not_a_payslip(path):
         raise ValueError("כרגע אפשר לקרוא רק תלושי שכר.")
 
     monkeypatch.setattr(appmod, "read_payslip", not_a_payslip)
-    *_, status = appmod.make_partner_payslip_handler(store, uid)("report.pdf")
+    *_, status = appmod.make_payslip_handler(store, uid, appmod.PARTNER_PAYSLIP_OK)("report.pdf")
     assert "רק תלושי שכר" in status
 
 
@@ -475,3 +515,51 @@ def test_utf8_console_lets_hebrew_print_on_cp1252_stream():
     stream.flush()
     assert "מסד נתונים".encode("utf-8") in raw.getvalue()
     appmod.utf8_console(object())  # זרם בלי reconfigure לא נשבר
+
+
+def test_console_script_points_to_app_main():
+    import tomllib
+    from importlib import import_module
+    from pathlib import Path
+
+    pyproject = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8"))
+    module, func = pyproject["project"]["scripts"]["portfolio-copilot"].split(":")
+    assert getattr(import_module(module), func) is appmod.main
+
+
+def test_gemini_smoke_script_is_not_collected_by_pytest():
+    from pathlib import Path
+
+    root = Path(__file__).parents[1]
+    assert not (root / "test_gemini.py").exists()
+    assert not list((root / "scripts").glob("test_*.py"))
+
+
+@pytest.mark.parametrize("message", [appmod.PAYSLIP_OK, appmod.PARTNER_PAYSLIP_OK])
+def test_payslip_warnings_are_shown_under_the_reading_result(monkeypatch, message):
+    store, uid = new_store()
+    warnings = ["ברוטו פחות ניכויי חובה לא שווה לנטו", "חודש התלוש לא בפורמט YYYY-MM"]
+    doc = {"doc_type": "payslip", "period": "2026-10", "data": {}, "warnings": warnings,
+           "summary": {"net_to_bank": 17200.0, "pension_monthly_total": 2100.0, "study_fund_monthly_total": 900.0}}
+    monkeypatch.setattr(appmod, "read_payslip", lambda path: doc)
+    net, *_, status = appmod.make_payslip_handler(store, uid, message)("slip.pdf")
+    assert net == 17200.0  # השדות עדיין מתמלאים, והמשתמש מחליט אם לתקן
+    assert status.index("נקרא") < status.index("בדיקת החשבון בתלוש מצאה פערים")
+    assert all(w in status for w in warnings) and "pc-banner-warn" in status
+
+
+def test_payslip_without_warnings_shows_no_warning_box(monkeypatch):
+    store, uid = new_store()
+    doc = {"doc_type": "payslip", "period": "2026-10", "data": {}, "warnings": [],
+           "summary": {"net_to_bank": 1.0, "pension_monthly_total": None, "study_fund_monthly_total": None}}
+    monkeypatch.setattr(appmod, "read_payslip", lambda path: doc)
+    *_, status = appmod.make_payslip_handler(store, uid)("slip.pdf")
+    assert "pc-banner-warn" not in status and "התלוש נקרא" in status
+
+
+def test_payslip_warnings_are_escaped():
+    from portfolio_copilot.ui import payslip_status_html
+
+    html = payslip_status_html(appmod.PAYSLIP_OK, ["<b>x</b>"])
+    assert "<b>x</b>" not in html and "&lt;b&gt;x&lt;/b&gt;" in html
+

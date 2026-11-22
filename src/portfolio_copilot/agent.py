@@ -6,7 +6,7 @@ import time
 from dotenv import load_dotenv
 from openai import OpenAI
 from portfolio_copilot.schemas import InvestorProfile
-from portfolio_copilot.documents import read_document
+from portfolio_copilot.documents import extract_json, read_document
 from portfolio_copilot.agent_tools import PROFILE_TOOLS, run_profile_tool, run_tool, tool_specs
 
 load_dotenv()
@@ -20,13 +20,17 @@ client = OpenAI(
 
 MODEL_NAME = os.getenv("MODEL_NAME") or "models/gemini-3.5-flash-lite"
 MAX_TOOL_ROUNDS = 4
+# תקרות עלות: כמה הודעות אחרונות מהשיחה נשלחות למודל (הפרופיל נשלח בנפרד בכל תור, ולכן לא הולך לאיבוד),
+# וכמה טוקנים מותר למודל לייצר בתשובה אחת (בכל סבב של הלולאה)
+MAX_HISTORY_MESSAGES = 20
+MAX_REPLY_TOKENS = 2048
 
 
 def read_payslip(path: str) -> dict:
     """קורא תלוש שכר (PDF) ומחזיר את מה שחולץ ונבדק בקוד. ה-client ושם המודל נשארים בתוך המודול הזה."""
     return read_document(path, client, MODEL_NAME)
 
-SYSTEM_PROMPT = """אתה Portfolio Copilot – מתכנן ומאפיין פיננסי אישי, בפרויקט אקדמי בקורס מבוא לבינה מלאכותית.
+SYSTEM_PROMPT = """אתה Portfolio Copilot – מתכנן ומאפיין פיננסי אישי, בפרויקט אקדמי בקורס "פיתוח פתרונות מבוססי AI".
 אתה לא יועץ השקעות או פנסיה מורשה, ואתה לא מציג את עצמך ככזה. מותר להזכיר זאת בקצרה כשמתאים.
 תפקידך לנהל שיחה אמפתית ומקצועית בעברית: לבנות את פרופיל המשקיע, ולהסביר את ההצעה ואת החלוקה החודשית שהקוד מחשב.
 
@@ -85,16 +89,6 @@ SYSTEM_PROMPT = """אתה Portfolio Copilot – מתכנן ומאפיין פינ
 """
 
 
-def extract_json(text: str) -> dict:
-    """מחלץ אובייקט JSON מהתשובה. strict=False מאפשר ירידות שורה גולמיות בתוך מחרוזות,
-    דבר שמודלים עושים הרבה ושמפיל את הפענוח הרגיל."""
-    text = text.strip()
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if match:
-        text = match.group(0)
-    return json.loads(text, strict=False)
-
-
 def salvage_reply(text: str) -> str | None:
     """אם ה-JSON שבור, מנסה לשלוף לפחות את שדה reply כדי שהמשתמש יקבל תשובה."""
     match = re.search(r'"reply"\s*:\s*"((?:[^"\\]|\\.)*)"', text or "", re.DOTALL)
@@ -131,6 +125,11 @@ def final_reply_text(raw: str | None) -> str:
     return text
 
 
+def recent_history(messages_history: list[dict], limit: int = MAX_HISTORY_MESSAGES) -> list[dict]:
+    """רק limit ההודעות האחרונות של השיחה. ההיסטוריה המלאה נשארת במסך, רק מה שנשלח למודל מוגבל."""
+    return list(messages_history[-limit:]) if limit > 0 else []
+
+
 def chat_step(messages_history: list[dict], current_profile: InvestorProfile,
               store=None, user_id: int | None = None,
               today: datetime.date | None = None) -> tuple[str, InvestorProfile]:
@@ -149,12 +148,13 @@ def chat_step(messages_history: list[dict], current_profile: InvestorProfile,
         {"role": "system", "content": f"{SYSTEM_PROMPT}\n{today_line}"},
         profile_message(current_profile),
     ]
-    prompt_messages.extend(messages_history)
+    prompt_messages.extend(recent_history(messages_history))
     use_tools = store is not None and user_id is not None
 
     try:
         for round_no in range(MAX_TOOL_ROUNDS + 1):
-            kwargs = {"model": MODEL_NAME, "messages": prompt_messages, "temperature": 0.3}
+            kwargs = {"model": MODEL_NAME, "messages": prompt_messages, "temperature": 0.3,
+                      "max_tokens": MAX_REPLY_TOKENS}
             if use_tools and round_no < MAX_TOOL_ROUNDS:
                 kwargs["tools"] = tool_specs()
             started = time.perf_counter()

@@ -6,7 +6,7 @@ from test_agent_flow import Call, FakeClient, Msg  # קודם: מגדיר משת
 from portfolio_copilot import agent
 from portfolio_copilot.agent_tools import run_profile_tool, tool_specs
 from portfolio_copilot.db import Store
-from portfolio_copilot.schemas import InvestorProfile, apply_profile_update, merge_profile
+from portfolio_copilot.schemas import InvestorProfile, apply_profile_update
 
 
 # תמונת מצב פיננסית מלאה מהראיון (תרחיש 2)
@@ -133,14 +133,22 @@ def test_financial_fields_do_not_block_calculations():
     assert p.is_complete() and "employment_status" in p.missing_fields()
 
 
-def test_free_json_cannot_remove_no_buy():
-    p = merge_profile(complete_profile(no_buy_symbols=["ZIM"]), {"no_buy_symbols": []})
-    assert p.no_buy_symbols == ["ZIM"]
+def test_update_profile_cannot_remove_no_buy():
+    p, _, rejected = apply_profile_update(complete_profile(no_buy_symbols=["ZIM"]), {"no_buy_symbols": []})
+    assert p.no_buy_symbols == ["ZIM"] and "no_buy_symbols" in rejected
 
 
-def test_free_json_cannot_change_unknown_fields():
-    p = merge_profile(InvestorProfile(unknown_fields=["pension_balance"]), {"unknown_fields": ["age"]})
-    assert p.unknown_fields == ["pension_balance"]
+def test_update_profile_cannot_mark_age_as_unknown():
+    p, _, rejected = apply_profile_update(InvestorProfile(unknown_fields=["pension_balance"]), {"unknown_fields": ["age"]})
+    assert p.unknown_fields == ["pension_balance"] and "age" in rejected
+
+
+def test_complete_requires_user_confirmation():
+    """הועבר מ-test_profile_merge.py: is_complete דורש שהמשתמש אישר את רמת הסיכון."""
+    p = InvestorProfile(age=13, recommended_risk_level="אגרסיבי", investment_horizon_years=30)
+    assert not p.is_complete()
+    p, _, _ = apply_profile_update(p, {"risk_confirmed": True})
+    assert p.is_complete()
 
 
 def test_profile_saved_before_new_fields_still_loads():
@@ -218,7 +226,7 @@ def test_married_without_spouse_income_is_missing():
     for status in ("נשוי", "ידוע בציבור"):
         p, accepted, rejected = apply_profile_update(InvestorProfile(age=40), {"marital_status": status})
         assert accepted == {"marital_status": status} and rejected == {}
-        assert p.spouse_income_required()
+        assert p.is_partnered()
         assert p.missing_fields()[0] == "spouse_monthly_net_income"
         p, _, _ = apply_profile_update(p, {"spouse_monthly_net_income": 12000})
         assert p.spouse_monthly_net_income == 12000 and "spouse_monthly_net_income" not in p.missing_fields()
@@ -227,7 +235,7 @@ def test_married_without_spouse_income_is_missing():
 def test_single_does_not_need_spouse_income():
     for status in ("רווק", "גרוש", "אלמן"):
         p, _, _ = apply_profile_update(InvestorProfile(age=40), {"marital_status": status})
-        assert not p.spouse_income_required()
+        assert not p.is_partnered()
         assert "spouse_monthly_net_income" not in p.missing_fields()
         assert p.missing_fields()[0] == "employment_status"
     assert "spouse_monthly_net_income" not in InvestorProfile().missing_fields()  # עוד לא ידוע המצב

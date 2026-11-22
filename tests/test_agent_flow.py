@@ -42,25 +42,23 @@ class FakeClient:
         return SimpleNamespace(choices=[SimpleNamespace(message=reply)])
 
 
-FINAL = "התיק שלך מאוזן"
+FINAL = "זו ההצעה שלך"
 
 
 def store_with_holding():
     s = Store(":memory:")
-    uid = s.get_or_create_user("demo")
-    s.upsert_holding(uid, "VT", 10)
-    return s, uid
+    return s, s.get_or_create_user("demo")
 
 
 def test_tool_round_trip(monkeypatch):
-    fake = FakeClient([Msg(tool_calls=[Call("c1", "get_portfolio")]), Msg(content=FINAL)])
+    fake = FakeClient([Msg(tool_calls=[Call("c1", "get_proposal")]), Msg(content=FINAL)])
     monkeypatch.setattr(agent, "client", fake)
     s, uid = store_with_holding()
-    reply, profile = agent.chat_step([{"role": "user", "content": "מה מצב התיק?"}], InvestorProfile(), s, uid, fetch=lambda x: 100.0)
-    assert reply == "התיק שלך מאוזן" and profile == InvestorProfile()
+    reply, profile = agent.chat_step([{"role": "user", "content": "מה ההצעה שלי?"}], InvestorProfile(), s, uid)
+    assert reply == FINAL and profile == InvestorProfile()
     assert "tools" in fake.calls[0]
     tool_msg = [m for m in fake.calls[1]["messages"] if m["role"] == "tool"][0]
-    assert tool_msg["tool_call_id"] == "c1" and "VT" in tool_msg["content"]
+    assert tool_msg["tool_call_id"] == "c1" and '"missing"' in tool_msg["content"]
 
 
 def test_no_store_means_no_tools(monkeypatch):
@@ -103,9 +101,9 @@ def test_target_year_horizon_uses_injected_date(monkeypatch):
 
 
 def test_endless_tool_calls_terminate(monkeypatch):
-    fake = FakeClient([Msg(tool_calls=[Call("c", "get_portfolio")])])
+    fake = FakeClient([Msg(tool_calls=[Call("c", "get_proposal")])])
     monkeypatch.setattr(agent, "client", fake)
     s, uid = store_with_holding()
-    reply, _ = agent.chat_step([{"role": "user", "content": "היי"}], InvestorProfile(), s, uid, fetch=lambda x: 1.0)
+    reply, _ = agent.chat_step([{"role": "user", "content": "היי"}], InvestorProfile(), s, uid)
     assert len(fake.calls) == agent.MAX_TOOL_ROUNDS + 1
     assert "tools" not in fake.calls[-1] and isinstance(reply, str)

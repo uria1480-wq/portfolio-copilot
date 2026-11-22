@@ -1,10 +1,9 @@
-"""שכבת מסד נתונים (SQLite) לפרויקט: משתמשים, פרופיל, החזקות והפקדות."""
+"""שכבת מסד נתונים (SQLite): משתמשים, פרופיל, תלושים שהועלו ודיווחים חודשיים."""
 import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
-from portfolio_copilot.plan import SavingsPlan
 from portfolio_copilot.schemas import InvestorProfile
 
 SCHEMA = """
@@ -21,6 +20,7 @@ CREATE TABLE IF NOT EXISTS profiles (
     updated_at  TEXT NOT NULL
 );
 
+-- holdings, deposits, plans, state: טבלאות מגרסאות קודמות. לא בשימוש, ונשארות כדי לא לשנות מסד קיים
 CREATE TABLE IF NOT EXISTS holdings (
     id          INTEGER PRIMARY KEY,
     user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS deposits (
     note          TEXT
 );
 
+-- תלושים שהועלו בדיווח החודשי (רק המספרים שחולצו, לא הקובץ)
 CREATE TABLE IF NOT EXISTS documents (
     id           INTEGER PRIMARY KEY,
     user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -49,14 +50,12 @@ CREATE TABLE IF NOT EXISTS documents (
     UNIQUE (user_id, doc_type, period)
 );
 
--- תוכנית החיסכון החודשית של המשתמש (JSON אחד, הסכמה ב-Pydantic)
 CREATE TABLE IF NOT EXISTS plans (
     user_id     INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     data_json   TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
 
--- מצב כללי לפי מפתח: תשובות הראיון וההדרכה האחרונה
 CREATE TABLE IF NOT EXISTS state (
     user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     key         TEXT NOT NULL,
@@ -65,7 +64,7 @@ CREATE TABLE IF NOT EXISTS state (
     PRIMARY KEY (user_id, key)
 );
 
--- היסטוריית אירועי "נכנסה משכורת" וההצעות שניתנו
+-- היסטוריית הדיווחים החודשיים (MonthlyReport כ-JSON)
 CREATE TABLE IF NOT EXISTS salary_events (
     id          INTEGER PRIMARY KEY,
     user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -75,6 +74,9 @@ CREATE TABLE IF NOT EXISTS salary_events (
     created_at  TEXT NOT NULL
 );
 """
+
+
+ALL_HISTORY = -1  # SQLite: LIMIT -1 הוא בלי הגבלה. קרן החירום והדשבורד סופרים את כל הדיווחים
 
 
 def _now() -> str:
@@ -118,45 +120,7 @@ class Store:
         ).fetchone()
         return InvestorProfile.model_validate_json(row["data_json"]) if row else InvestorProfile()
 
-    # --- החזקות ---
-    def upsert_holding(self, user_id: int, symbol: str, quantity: float, avg_cost: float | None = None) -> None:
-        with self.conn:
-            self.conn.execute(
-                """INSERT INTO holdings (user_id, symbol, quantity, avg_cost, updated_at)
-                   VALUES (?, ?, ?, ?, ?)
-                   ON CONFLICT(user_id, symbol) DO UPDATE SET
-                       quantity = excluded.quantity, avg_cost = excluded.avg_cost,
-                       updated_at = excluded.updated_at""",
-                (user_id, symbol.strip().upper(), quantity, avg_cost, _now()),
-            )
-
-    def delete_holding(self, user_id: int, symbol: str) -> None:
-        with self.conn:
-            self.conn.execute(
-                "DELETE FROM holdings WHERE user_id = ? AND symbol = ?", (user_id, symbol.strip().upper())
-            )
-
-    def list_holdings(self, user_id: int) -> list[dict]:
-        rows = self.conn.execute(
-            "SELECT symbol, quantity, avg_cost FROM holdings WHERE user_id = ? ORDER BY symbol", (user_id,)
-        ).fetchall()
-        return [dict(r) for r in rows]
-
-    # --- הפקדות ---
-    def add_deposit(self, user_id: int, amount: float, note: str | None = None, deposited_at: str | None = None) -> None:
-        with self.conn:
-            self.conn.execute(
-                "INSERT INTO deposits (user_id, amount, deposited_at, note) VALUES (?, ?, ?, ?)",
-                (user_id, amount, deposited_at or _now(), note),
-            )
-
-    def list_deposits(self, user_id: int) -> list[dict]:
-        rows = self.conn.execute(
-            "SELECT amount, deposited_at, note FROM deposits WHERE user_id = ? ORDER BY deposited_at, id",
-            (user_id,),
-        ).fetchall()
-        return [dict(r) for r in rows]
-
+    # --- מסמכים ---
     def save_document(self, user_id: int, doc: dict) -> None:
         with self.conn:
             self.conn.execute(
@@ -167,30 +131,7 @@ class Store:
                 (user_id, doc["doc_type"], doc.get("period"), json.dumps(doc, ensure_ascii=False), _now()),
             )
 
-    def list_documents(self, user_id: int, doc_type: str | None = None) -> list[dict]:
-        sql = "SELECT data_json FROM documents WHERE user_id = ?"
-        params: list = [user_id]
-        if doc_type:
-            sql += " AND doc_type = ?"
-            params.append(doc_type)
-        rows = self.conn.execute(sql + " ORDER BY period DESC, id DESC", params).fetchall()
-        return [json.loads(r["data_json"]) for r in rows]
-
-    # --- תוכנית חודשית ---
-    def save_plan(self, user_id: int, plan: SavingsPlan) -> None:
-        with self.conn:
-            self.conn.execute(
-                """INSERT INTO plans (user_id, data_json, updated_at) VALUES (?, ?, ?)
-                   ON CONFLICT(user_id) DO UPDATE SET
-                       data_json = excluded.data_json, updated_at = excluded.updated_at""",
-                (user_id, plan.model_dump_json(), _now()),
-            )
-
-    def load_plan(self, user_id: int) -> SavingsPlan:
-        row = self.conn.execute("SELECT data_json FROM plans WHERE user_id = ?", (user_id,)).fetchone()
-        return SavingsPlan.model_validate_json(row["data_json"]) if row else SavingsPlan()
-
-    # --- אירועי משכורת ---
+    # --- דיווחים חודשיים ---
     def add_salary_event(self, user_id: int, result: dict) -> None:
         with self.conn:
             self.conn.execute(
@@ -203,19 +144,3 @@ class Store:
             "SELECT data_json FROM salary_events WHERE user_id = ? ORDER BY id DESC LIMIT ?", (user_id, limit)
         ).fetchall()
         return [json.loads(r["data_json"]) for r in rows]
-
-    # --- מצב כללי (ראיון, הדרכה) ---
-    def save_state(self, user_id: int, key: str, data: dict) -> None:
-        with self.conn:
-            self.conn.execute(
-                """INSERT INTO state (user_id, key, data_json, updated_at) VALUES (?, ?, ?, ?)
-                   ON CONFLICT(user_id, key) DO UPDATE SET
-                       data_json = excluded.data_json, updated_at = excluded.updated_at""",
-                (user_id, key, json.dumps(data, ensure_ascii=False), _now()),
-            )
-
-    def load_state(self, user_id: int, key: str) -> dict | None:
-        row = self.conn.execute(
-            "SELECT data_json FROM state WHERE user_id = ? AND key = ?", (user_id, key)
-        ).fetchone()
-        return json.loads(row["data_json"]) if row else None

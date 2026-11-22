@@ -70,8 +70,10 @@ def test_spouse_income_row_only_when_partnered():
 def test_old_intake_and_old_manual_values_are_not_displayed():
     store = Store(":memory:")
     uid = store.get_or_create_user("demo")
-    store.save_state(uid, "intake", {"monthly_net_income": 20000, "liquid_savings": 50000, "pension_value": 5000})
-    store.save_state(uid, "assets", {"monthly_net_income": 18000, "liquid_savings": 30000, "pension_value": 7000})
+    # נתונים ישנים שאולי עוד נמצאים במסד קיים (טבלת state כבר לא בשימוש)
+    for key, data in (("intake", '{"monthly_net_income": 20000, "liquid_savings": 50000}'),
+                      ("assets", '{"monthly_net_income": 18000, "pension_value": 7000}')):
+        store.conn.execute("INSERT INTO state VALUES (?, ?, ?, '2026-01-01')", (uid, key, data))
     store.save_profile(uid, InvestorProfile(age=30))
     r = rows(load_situation(store, uid))
     assert r["age"]["display"] == "30"
@@ -82,7 +84,7 @@ def test_old_intake_and_old_manual_values_are_not_displayed():
 def test_stored_holdings_and_documents_are_ignored():
     store = Store(":memory:")
     uid = store.get_or_create_user("demo")
-    store.upsert_holding(uid, "VT", 10)
+    store.conn.execute("INSERT INTO holdings (user_id, symbol, quantity, updated_at) VALUES (?, 'VT', 10, '2026-01-01')", (uid,))
     store.save_document(uid, {"doc_type": "fund_report", "period": "2026-Q1", "data": {}, "warnings": [],
                               "summary": {"fund_type": "pension", "fund_name": "קרן", "provider": "חברה",
                                           "balance_end": 250000.0}})

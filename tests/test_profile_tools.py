@@ -1,4 +1,4 @@
-"""בניית פרופיל בשיחה (update_profile) והגבלות "לא מוכר" (add_restriction), עם מודל מדומה."""
+"""בניית פרופיל בשיחה (update_profile) והגבלות "אל תקנה" (add_restriction), עם מודל מדומה."""
 import json
 from datetime import date
 
@@ -7,13 +7,6 @@ from portfolio_copilot import agent
 from portfolio_copilot.agent_tools import run_profile_tool, tool_specs
 from portfolio_copilot.db import Store
 from portfolio_copilot.schemas import InvestorProfile, apply_profile_update, merge_profile
-from portfolio_copilot.tools import plan_trades
-
-PRICES = {"ZIM": 20.0, "VT": 100.0, "BND": 70.0, "BIL": 90.0}
-
-
-def fetch(symbol):
-    return PRICES[symbol]
 
 
 # תמונת מצב פיננסית מלאה מהראיון (תרחיש 2)
@@ -32,12 +25,8 @@ def complete_profile(**extra):
 
 
 def concentrated_store():
-    """תיק שבו ZIM הוא 50% מהשווי, הרבה מעל תקרת ה-20%."""
     s = Store(":memory:")
-    uid = s.get_or_create_user("demo")
-    s.upsert_holding(uid, "ZIM", 100)   # 2,000
-    s.upsert_holding(uid, "VT", 20)     # 2,000
-    return s, uid
+    return s, s.get_or_create_user("demo")
 
 
 def final(reply="בסדר"):
@@ -110,7 +99,7 @@ def test_target_year_must_be_whole_number():
 def test_update_profile_tool_passes_date_and_spec_has_target_year():
     result, p = run_profile_tool("update_profile", {"target_year": 2029}, InvestorProfile(), today=TODAY)
     assert p.investment_horizon_years == 3 and result["accepted"]["investment_horizon_years"] == 3
-    fn = next(t for t in tool_specs(False) if t["function"]["name"] == "update_profile")["function"]
+    fn = next(t for t in tool_specs() if t["function"]["name"] == "update_profile")["function"]
     assert "target_year" in fn["parameters"]["properties"] and "target_year" in fn["description"]
 
 
@@ -127,8 +116,8 @@ def test_changing_risk_level_resets_confirmation():
 
 
 def test_restrictions_cannot_be_set_through_update_profile():
-    p, _, rejected = apply_profile_update(InvestorProfile(), {"no_sell_symbols": ["ZIM"], "restrictions": ["x"]})
-    assert set(rejected) == {"no_sell_symbols", "restrictions"} and p.no_sell_symbols == []
+    p, _, rejected = apply_profile_update(InvestorProfile(), {"no_buy_symbols": ["ZIM"], "restrictions": ["x"]})
+    assert set(rejected) == {"no_buy_symbols", "restrictions"} and p.no_buy_symbols == []
 
 
 def test_missing_fields_order_and_completion():
@@ -144,9 +133,9 @@ def test_financial_fields_do_not_block_calculations():
     assert p.is_complete() and "employment_status" in p.missing_fields()
 
 
-def test_free_json_cannot_remove_no_sell():
-    p = merge_profile(complete_profile(no_sell_symbols=["ZIM"]), {"no_sell_symbols": []})
-    assert p.no_sell_symbols == ["ZIM"]
+def test_free_json_cannot_remove_no_buy():
+    p = merge_profile(complete_profile(no_buy_symbols=["ZIM"]), {"no_buy_symbols": []})
+    assert p.no_buy_symbols == ["ZIM"]
 
 
 def test_free_json_cannot_change_unknown_fields():
@@ -260,7 +249,7 @@ def test_spouse_not_working_records_zero():
 
 
 def test_tool_spec_has_marital_fields_and_no_none_examples():
-    fn = next(t for t in tool_specs(False) if t["function"]["name"] == "update_profile")["function"]
+    fn = next(t for t in tool_specs() if t["function"]["name"] == "update_profile")["function"]
     props = fn["parameters"]["properties"]
     assert props["marital_status"]["enum"] == ["רווק", "נשוי", "ידוע בציבור", "גרוש", "אלמן"]
     assert "spouse_monthly_net_income" in props
@@ -270,23 +259,13 @@ def test_tool_spec_has_marital_fields_and_no_none_examples():
 
 
 def test_update_profile_spec_lists_new_fields():
-    spec = next(t for t in tool_specs(False) if t["function"]["name"] == "update_profile")["function"]["parameters"]
+    spec = next(t for t in tool_specs() if t["function"]["name"] == "update_profile")["function"]["parameters"]
     props = spec["properties"]
     for field in FINANCE:
         assert field in props
     assert "age" not in props["unknown_fields"]["items"]["enum"]
     assert "employment_status" not in props["none_fields"]["items"]["enum"]
     assert "investment_goal" in props["none_fields"]["items"]["enum"]
-
-
-# ---------- אכיפה בקוד בחישוב ----------
-def test_plan_trades_honors_profile_no_sell():
-    holdings = [{"symbol": "ZIM", "quantity": 100}, {"symbol": "VT", "quantity": 20}]
-    before = plan_trades(complete_profile(), holdings, PRICES, 1000, allow_sell=True)
-    assert [s["symbol"] for s in before["sells"]] == ["ZIM"]
-    after = plan_trades(complete_profile(no_sell_symbols=["ZIM"]), holdings, PRICES, 1000, allow_sell=True)
-    assert after["sells"] == [] and after["kept_symbols"] == ["ZIM"]
-    assert abs(sum(after["buys"].values()) - 1000) < 0.01
 
 
 # ---------- הכלים עצמם ----------
@@ -301,31 +280,32 @@ def test_update_profile_tool_reports_next_field():
 
 def test_add_restriction_rejects_bad_input_without_changing_profile():
     p = complete_profile()
-    for args in ({"symbol": ""}, {"symbol": "צים בע\"מ"}, {"symbol": "ZIM", "kind": "no_buy"}):
+    for args in ({"item": ""}, {"item": "   "}, {"item": "x" * 61}, {"item": "ZIM", "kind": "no_sell"}, {}):
         result, same = run_profile_tool("add_restriction", args, p)
         assert "error" in result and same == p
 
 
-def test_add_restriction_saves_and_replans():
-    s, uid = concentrated_store()
-    result, p = run_profile_tool("add_restriction", {"symbol": " zim ", "allow_sell": True},
-                                 complete_profile(), s, uid, fetch)
-    assert p.no_sell_symbols == ["ZIM"] and "לא למכור: ZIM" in p.restrictions
-    assert result["saved"] and result["replan"]["sells"] == []
-    assert result["replan"]["kept_symbols"] == ["ZIM"]
+def test_add_restriction_saves_no_buy():
+    result, p = run_profile_tool("add_restriction", {"item": " zim "}, complete_profile())
+    assert p.no_buy_symbols == ["ZIM"] and "לא לקנות: ZIM" in p.restrictions
+    assert result["saved"] and result["no_buy_symbols"] == ["ZIM"] and "replan" not in result
     # הוספה חוזרת לא יוצרת כפילות
-    _, p = run_profile_tool("add_restriction", {"symbol": "ZIM"}, p, s, uid, fetch)
-    assert p.no_sell_symbols == ["ZIM"]
+    _, p = run_profile_tool("add_restriction", {"item": "ZIM"}, p)
+    assert p.no_buy_symbols == ["ZIM"] and p.restrictions.count("לא לקנות: ZIM") == 1
 
 
-def test_add_restriction_without_complete_profile_skips_replan():
-    s, uid = concentrated_store()
-    result, p = run_profile_tool("add_restriction", {"symbol": "ZIM"}, InvestorProfile(), s, uid, fetch)
-    assert p.no_sell_symbols == ["ZIM"] and result["replan"] is None
+def test_add_restriction_accepts_hebrew_asset_class():
+    _, p = run_profile_tool("add_restriction", {"item": 'אג"ח  קונצרני'}, InvestorProfile())
+    assert p.no_buy_symbols == ['אג"ח קונצרני'] and 'לא לקנות: אג"ח קונצרני' in p.restrictions
+
+
+def test_old_saved_profile_with_no_sell_field_still_loads():
+    p = InvestorProfile.model_validate_json('{"age": 40, "no_sell_symbols": ["ZIM"], "restrictions": ["לא למכור: ZIM"]}')
+    assert p.age == 40 and p.no_buy_symbols == [] and p.restrictions == ["לא למכור: ZIM"]
 
 
 def test_profile_tools_are_exposed_to_model():
-    names = {t["function"]["name"] for t in tool_specs(False)}
+    names = {t["function"]["name"] for t in tool_specs()}
     assert {"update_profile", "add_restriction"} <= names
 
 
@@ -348,22 +328,18 @@ def test_chat_step_updates_profile_inside_loop(monkeypatch):
     assert s.load_profile(uid).age == 33
 
 
-def test_restriction_and_replan_in_same_turn(monkeypatch):
-    """המשתמש אומר "אני לא מוכר את ZIM": ההגבלה נשמרת, ו-plan_deposit שרץ אחריה באותו תור מכבד אותה
-    גם בלי שהמודל העביר keep_symbols."""
+def test_no_buy_restriction_saved_in_chat_turn(monkeypatch):
+    """המשתמש אומר "אל תקנה TSLA": ההגבלה נשמרת בפרופיל וב-store באותו תור."""
     fake = FakeClient([
-        Msg(tool_calls=[Call("c1", "add_restriction", json.dumps({"symbol": "ZIM"}))]),
-        Msg(tool_calls=[Call("c2", "plan_deposit", json.dumps({"amount": 1000, "allow_sell": True}))]),
-        final("עדכנתי. ZIM לא יוצע למכירה"),
+        Msg(tool_calls=[Call("c1", "add_restriction", json.dumps({"item": "TSLA"}))]),
+        final("רשמתי: לא לקנות TSLA"),
     ])
     monkeypatch.setattr(agent, "client", fake)
     s, uid = concentrated_store()
-    reply, p = agent.chat_step([{"role": "user", "content": "אני לא מוכר את ZIM"}], complete_profile(),
-                               s, uid, fetch=fetch)
+    reply, p = agent.chat_step([{"role": "user", "content": "אל תקנה TSLA"}], complete_profile(), s, uid)
 
-    assert p.no_sell_symbols == ["ZIM"] and s.load_profile(uid).no_sell_symbols == ["ZIM"]
-    plan = tool_results(fake.calls[2])[-1]
-    assert plan["sells"] == [] and plan["kept_symbols"] == ["ZIM"]
+    assert p.no_buy_symbols == ["TSLA"] and s.load_profile(uid).no_buy_symbols == ["TSLA"]
+    assert tool_results(fake.calls[1])[-1]["saved"]
 
 
 def test_multi_turn_interview_until_complete(monkeypatch):
@@ -432,13 +408,13 @@ def test_profile_in_final_json_is_ignored(monkeypatch):
 
 def test_each_round_prints_llm_time_and_tools(monkeypatch, capsys):
     fake = FakeClient([
-        Msg(tool_calls=[Call("c1", "update_profile", '{"age": 50}'), Call("c2", "get_portfolio")]),
+        Msg(tool_calls=[Call("c1", "update_profile", '{"age": 50}'), Call("c2", "get_proposal")]),
         final("בסדר"),
     ])
     monkeypatch.setattr(agent, "client", fake)
     s, uid = concentrated_store()
-    agent.chat_step([{"role": "user", "content": "בן 50"}], InvestorProfile(), s, uid, fetch=fetch)
+    agent.chat_step([{"role": "user", "content": "בן 50"}], InvestorProfile(), s, uid)
     lines = [l for l in capsys.readouterr().out.splitlines() if l.startswith("[agent] round")]
     assert len(lines) == 2
-    assert lines[0].startswith("[agent] round 1: LLM ") and "update_profile (" in lines[0] and "get_portfolio (" in lines[0]
+    assert lines[0].startswith("[agent] round 1: LLM ") and "update_profile (" in lines[0] and "get_proposal (" in lines[0]
     assert lines[1].startswith("[agent] round 2: LLM ") and "tools: none" in lines[1]

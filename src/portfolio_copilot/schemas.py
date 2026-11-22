@@ -46,10 +46,10 @@ class InvestorProfile(BaseModel):
         default=None, description="הסבר קצר של הסוכן מדוע רמת הסיכון והמכשירים האלו מתאימים"
     )
     restrictions: List[str] = Field(
-        default_factory=list, description="מגבלות אישיות (נכסים לא למכירה, חרמות וכו')"
+        default_factory=list, description="מגבלות אישיות (מה לא לקנות, חרמות וכו')"
     )
-    no_sell_symbols: List[str] = Field(
-        default_factory=list, description="סימולים שהמשתמש אמר שלא ימכור. נאכף בקוד בכל חישוב מכירה"
+    no_buy_symbols: List[str] = Field(
+        default_factory=list, description="מה שהמשתמש אמר שלא יקנה (מניה, קרן או סוג נכס). נשמר דרך add_restriction"
     )
 
     # תמונת המצב הפיננסית מהראיון (תרחיש 2). סכומים בשקלים, לא שליליים.
@@ -102,7 +102,7 @@ class InvestorProfile(BaseModel):
 
 LIST_FIELDS = ("relevant_vehicles", "restrictions")
 # שדות שמשתנים רק דרך כלי ייעודי (add_restriction, update_profile), ולא דרך ה-JSON החופשי של המודל
-PROTECTED_FIELDS = ("no_sell_symbols", "unknown_fields")
+PROTECTED_FIELDS = ("no_buy_symbols", "unknown_fields")
 
 LIFE_STAGES = ("נוער", "סטודנט", "משפחה צעירה", "לקראת פרישה", "פנסיונר")
 RISK_LEVELS = ("שמרני", "מאוזן", "אגרסיבי")
@@ -260,7 +260,7 @@ def apply_profile_update(current: InvestorProfile, patch: dict,
             continue
         validator = PROFILE_VALIDATORS.get(key)
         if validator is None:
-            rejected[key] = ("מגבלות נשמרות דרך add_restriction" if key in ("restrictions", "no_sell_symbols")
+            rejected[key] = ("מגבלות נשמרות דרך add_restriction" if key in ("restrictions", "no_buy_symbols")
                              else "שדה לא מוכר")
             continue
         clean, reason = validator(value)

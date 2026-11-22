@@ -1,72 +1,61 @@
+"""הכלים של "שאל את הסוכן": get_proposal ו-get_monthly_allocation מחזירים את מה שהקוד מחשב (proposal.py)."""
+from datetime import date
+
 from portfolio_copilot.agent_tools import run_tool
 from portfolio_copilot.db import Store
-from portfolio_copilot.schemas import InvestorProfile, merge_profile
+from portfolio_copilot.proposal import allocate_monthly, build_proposal
+from portfolio_copilot.schemas import InvestorProfile
 
-PRICES = {"VT": 100.0, "BND": 50.0, "ZIM": 20.0}
-fetch = lambda s: PRICES[s]
+TODAY = date(2026, 11, 22)
 
 
 def setup():
     s = Store(":memory:")
-    uid = s.get_or_create_user("demo")
-    s.upsert_holding(uid, "VT", 10)
-    s.upsert_holding(uid, "BND", 10)
-    return s, uid
+    return s, s.get_or_create_user("demo")
 
 
 def approved(**extra):
-    return merge_profile(InvestorProfile(), {"age": 30, "recommended_risk_level": "מאוזן", "risk_confirmed": True,
-                                             "investment_horizon_years": 15, **extra})
+    return InvestorProfile(**{"age": 30, "recommended_risk_level": "מאוזן", "risk_confirmed": True,
+                              "investment_horizon_years": 15, "marital_status": "רווק", "employment_status": "שכיר/ה",
+                              "monthly_net_income": 20000, "monthly_expenses": 10000, "liquid_savings": 30000,
+                              "monthly_debt_payments": 0, "monthly_deposit": 4000, **extra})
 
 
-def test_get_portfolio_values_and_weights():
+def test_get_proposal_returns_build_proposal():
     s, uid = setup()
-    r = run_tool("get_portfolio", {}, s, uid, InvestorProfile(), fetch)
-    assert r["total_value"] == 1500 and r["price_errors"] == []
-    assert {h["symbol"]: h["weight"] for h in r["holdings"]} == {"VT": 0.6667, "BND": 0.3333}
+    r = run_tool("get_proposal", {}, s, uid, approved(), TODAY)
+    assert r == build_proposal(approved(), TODAY).model_dump(mode="json")
+    assert r["capital"]["allocation"] and r["safety"]["shortfall"] == 30000  # יעד 6 חודשים = 60,000
 
 
-def test_get_portfolio_reports_missing_prices_instead_of_failing():
+def test_get_proposal_reports_missing_fields_instead_of_guessing():
     s, uid = setup()
-    def flaky(sym):
-        if sym == "BND":
-            raise ValueError("no price")
-        return 100.0
-    r = run_tool("get_portfolio", {}, s, uid, InvestorProfile(), flaky)
-    assert r["price_errors"] == ["BND"] and r["total_value"] == 1000
+    r = run_tool("get_proposal", {}, s, uid, InvestorProfile(), TODAY)
+    assert r["capital"] is None and "age" in r["missing"]
 
 
-def test_get_portfolio_empty():
-    s = Store(":memory:")
-    r = run_tool("get_portfolio", {}, s, s.get_or_create_user("demo"), InvestorProfile(), fetch)
-    assert r["holdings"] == []
-
-
-def test_plan_deposit_uses_amount_and_splits_all_of_it():
+def test_get_monthly_allocation_uses_amount():
     s, uid = setup()
-    r = run_tool("plan_deposit", {"amount": 1000}, s, uid, approved(), fetch)
-    assert "error" not in r and abs(sum(r["buys"].values()) - 1000) < 0.01 and r["sells"] == []
+    r = run_tool("get_monthly_allocation", {"amount": 2000}, s, uid, approved(liquid_savings=100000), TODAY)
+    assert r == allocate_monthly(approved(liquid_savings=100000), 2000, TODAY).model_dump(mode="json")
+    assert r["emergency_amount"] == 0 and round(sum(line["amount"] for line in r["lines"]), 2) == 2000
 
 
-def test_plan_deposit_defaults_to_profile_monthly_deposit():
+def test_get_monthly_allocation_defaults_to_profile_deposit():
     s, uid = setup()
-    r = run_tool("plan_deposit", {}, s, uid, approved(monthly_deposit=2000), fetch)
-    assert r["deposit"] == 2000
+    r = run_tool("get_monthly_allocation", {}, s, uid, approved(), TODAY)
+    assert r["deposit"] == 4000 and r["emergency_amount"] == 4000  # חוסר 30,000 בקרן החירום
 
 
-def test_plan_deposit_errors_are_returned_not_raised():
+def test_get_monthly_allocation_counts_emergency_already_deposited():
     s, uid = setup()
-    assert "סכום" in run_tool("plan_deposit", {}, s, uid, approved(), fetch)["error"]
-    unapproved = InvestorProfile(age=30, recommended_risk_level="מאוזן")
-    assert "error" in run_tool("plan_deposit", {"amount": 500}, s, uid, unapproved, fetch)
-    assert "error" in run_tool("nope", {}, s, uid, approved(), fetch)
+    s.add_salary_event(uid, {"period": "2026-10", "net": 20000, "allocation": {"emergency_amount": 29000}})
+    r = run_tool("get_monthly_allocation", {"amount": 4000}, s, uid, approved(), TODAY)
+    assert r["emergency_amount"] == 1000  # נשארו 1,000 מתוך חוסר של 30,000
 
 
-def test_rebalance_with_sell_and_keep_symbols():
+def test_tool_errors_are_returned_not_raised():
     s, uid = setup()
-    s.upsert_holding(uid, "ZIM", 4500)  # 90,000 מול 1,500 בשאר התיק
-    p = approved(max_single_asset_weight=0.20)
-    r = run_tool("plan_deposit", {"amount": 0, "allow_sell": True}, s, uid, p, fetch)
-    assert [x["symbol"] for x in r["sells"]] == ["ZIM"] and not r["cap_breached"]
-    kept = run_tool("plan_deposit", {"amount": 0, "allow_sell": True, "keep_symbols": ["ZIM"]}, s, uid, p, fetch)
-    assert kept["sells"] == [] and kept["cap_breached"]
+    assert "הפקדה חודשית" in run_tool("get_monthly_allocation", {}, s, uid, approved(monthly_deposit=None))["error"]
+    assert "חיובי" in run_tool("get_monthly_allocation", {"amount": -5}, s, uid, approved())["error"]
+    assert "error" in run_tool("nope", {}, s, uid, approved())

@@ -342,7 +342,47 @@ from portfolio_copilot.proposal import default_savings_percent, emergency_deposi
     (30000, 20000, None),    # מעל 100%
 ])
 def test_default_savings_percent(deposit, net, expected):
-    assert default_savings_percent(InvestorProfile(monthly_deposit=deposit, monthly_net_income=net)) == expected
+    d = default_savings_percent(InvestorProfile(monthly_deposit=deposit, monthly_net_income=net))
+    assert d.value == expected
+    assert d.explanation.startswith("השדה ריק") == (expected is None)
+
+
+@pytest.mark.parametrize("status", ["נשוי", "ידוע בציבור"])
+def test_default_percent_partnered_with_spouse_income_uses_combined_net(status):
+    d = default_savings_percent(InvestorProfile(marital_status=status, monthly_deposit=3000,
+                                                monthly_net_income=12000, spouse_monthly_net_income=8000))
+    assert d.value == 15.0  # 3,000 / 20,000
+    assert "נטו משותף של ₪20,000" in d.explanation
+
+
+def test_default_percent_partnered_without_spouse_income_uses_own_net():
+    d = default_savings_percent(InvestorProfile(marital_status="נשוי", monthly_deposit=3000, monthly_net_income=12000))
+    assert d.value == 25.0 and "משותף" not in d.explanation
+
+
+def test_default_percent_single_ignores_spouse_income():
+    d = default_savings_percent(InvestorProfile(marital_status="רווק", monthly_deposit=3000,
+                                                monthly_net_income=12000, spouse_monthly_net_income=8000))
+    assert d.value == 25.0 and "משותף" not in d.explanation
+
+
+def test_default_percent_partnered_spouse_without_income_counts_as_zero():
+    d = default_savings_percent(InvestorProfile(marital_status="נשוי", monthly_deposit=3000,
+                                                monthly_net_income=12000, spouse_monthly_net_income=0))
+    assert d.value == 25.0
+
+
+@pytest.mark.parametrize("fields, reason", [
+    ({"monthly_net_income": 12000}, "כמה אפשר להפריש"),
+    ({"monthly_deposit": 3000}, "הכנסה נטו"),
+    ({"monthly_deposit": 3000, "monthly_net_income": 0}, "₪0"),
+    ({"monthly_deposit": 30000, "monthly_net_income": 12000}, "גבוהה מהנטו שלך"),
+    ({"marital_status": "נשוי", "monthly_deposit": 30000, "monthly_net_income": 12000,
+      "spouse_monthly_net_income": 8000}, "גבוהה מהנטו המשותף"),
+])
+def test_empty_default_percent_explains_why(fields, reason):
+    d = default_savings_percent(InvestorProfile(**fields))
+    assert d.value is None and d.explanation.startswith("השדה ריק") and reason in d.explanation
 
 
 # ---------- קרן חירום מצטברת (משימה 4) ----------

@@ -2,7 +2,6 @@
 import html
 import inspect
 
-from portfolio_copilot.plan import SavingsPlan
 from portfolio_copilot.proposal import MONEY_MARKET, MonthlyReport, Proposal, history_row
 from portfolio_copilot.schemas import InvestorProfile
 
@@ -89,19 +88,10 @@ footer { display: none !important; }
 .pc-table th { text-align: right; font-size: 12.5px; color: var(--pc-muted); font-weight: 500; padding: 6px 8px; border-bottom: 1px solid var(--pc-line); }
 .pc-table td { padding: 10px 8px; border-bottom: 1px solid var(--pc-line); color: var(--pc-ink); }
 .pc-table tr:last-child td { border-bottom: none; }
-.pc-sym { direction: ltr; text-align: right; font-weight: 700; font-family: ui-monospace, Consolas, monospace; }
 
-.pc-doc { padding: 12px 0; border-bottom: 1px solid var(--pc-line); }
-.pc-doc:last-child { border-bottom: none; }
-.pc-doc b { font-size: 15.5px; }
-.pc-doc .pc-row { display: flex; gap: 18px; flex-wrap: wrap; margin-top: 6px; color: var(--pc-muted); font-size: 14px; }
-.pc-doc .pc-row span b { color: var(--pc-ink); }
 .pc-empty { color: var(--pc-muted); font-size: 14.5px; line-height: 1.6; padding: 6px 0; }
 
 .pc-section { margin: 14px 0 2px; font-size: 13px; font-weight: 700; color: var(--pc-muted); }
-.pc-actions { list-style: none; margin: 10px 0 0; padding: 0; }
-.pc-actions li { padding: 10px 12px; margin-bottom: 8px; border-radius: 12px; background: var(--pc-primary-soft); color: var(--pc-ink); font-size: 15px; }
-.pc-actions li b { font-weight: 700; }
 .pc-steps { direction: rtl; display: flex; gap: 10px; flex-wrap: wrap; margin: 6px 0 4px; }
 .pc-step { display: flex; align-items: center; gap: 8px; padding: 8px 16px; border-radius: 999px; font-size: 14.5px; font-weight: 600;
   background: var(--pc-card); color: var(--pc-muted); border: 1px solid var(--pc-line); }
@@ -223,124 +213,6 @@ def profile_html(profile: InvestorProfile) -> str:
         + _field("מגבלות שלי", restrictions, full=True)
         + "</div>" + reasoning + "</div>"
     )
-
-
-def holdings_html(holdings: list[dict], prefix: str = "") -> str:
-    head = banner_html(prefix)
-    if not holdings:
-        return head + '<div class="pc-card"><div class="pc-card-head"><h3>ההחזקות שלי</h3></div>' \
-                      '<div class="pc-empty">עדיין לא נטענו החזקות. העלה קובץ CSV עם העמודות symbol, quantity ו-avg_cost.</div></div>'
-    rows = "".join(
-        f'<tr><td class="pc-sym">{esc(h["symbol"])}</td><td>{h["quantity"]:g}</td>'
-        f'<td>{_money(h["avg_cost"]) if h.get("avg_cost") is not None else "—"}</td></tr>'
-        for h in holdings
-    )
-    return (head + '<div class="pc-card"><div class="pc-card-head"><h3>ההחזקות שלי</h3></div>'
-            '<table class="pc-table"><tr><th>סימול</th><th>כמות</th><th>עלות ממוצעת</th></tr>'
-            + rows + "</table></div>")
-
-
-def _pct(x) -> str:
-    return f"{x:.2f}%"
-
-
-def _slip_card(d: dict) -> str:
-    s = d["summary"]
-    net = _money(s["net_to_bank"]) if s.get("net_to_bank") is not None else "לא נמצא"
-    pension = _money(s["pension_monthly_total"]) if s.get("pension_monthly_total") is not None else "לא נמצא"
-    warn = ""
-    if d.get("warnings"):
-        warn = '<div style="margin-top:8px">' + _chips(["לבדוק מול התלוש: " + "; ".join(d["warnings"])], "pc-chip-wait") + "</div>"
-    return (
-        f'<div class="pc-doc"><b>{esc(s.get("period") or "חודש לא ידוע")}</b>'
-        f'<div class="pc-row"><span>נטו לתשלום <b>{esc(net)}</b></span>'
-        f'<span>הפרשה חודשית לפנסיה <b>{esc(pension)}</b></span></div>{warn}</div>'
-    )
-
-
-def _report_card(d: dict) -> str:
-    s = d["summary"]
-    title = f'{s.get("fund_name") or "דוח מקופה"} · {s.get("period") or "תקופה לא ידועה"}'
-    balance = _money(s["balance_end"]) if s.get("balance_end") is not None else "לא נמצא"
-    parts = [f'<span>יתרה <b>{esc(balance)}</b></span>']
-    if s.get("fee_on_savings_pct") is not None:
-        fee = _pct(s["fee_on_savings_pct"])
-        if s.get("avg_fee_on_savings_pct") is not None:
-            fee += f' (ממוצע הקופה {_pct(s["avg_fee_on_savings_pct"])})'
-        parts.append(f'<span>דמי ניהול מהצבירה <b>{esc(fee)}</b></span>')
-    if s.get("expected_annual_cost_pct") is not None:
-        parts.append(f'<span>עלות שנתית צפויה <b>{esc(_pct(s["expected_annual_cost_pct"]))}</b></span>')
-    if s.get("track_name"):
-        track = s["track_name"] + (f' · {_pct(s["track_return_pct"])}' if s.get("track_return_pct") is not None else "")
-        parts.append(f'<span>מסלול <b>{esc(track)}</b></span>')
-    notes = []
-    if s.get("no_beneficiaries"):
-        notes.append("לא נקבעו מוטבים בחשבון")
-    if d.get("warnings"):
-        notes.append("לבדוק מול הדוח: " + "; ".join(d["warnings"]))
-    chips = '<div style="margin-top:8px">' + _chips(notes, "pc-chip-wait") + "</div>" if notes else ""
-    return f'<div class="pc-doc"><b>{esc(title)}</b><div class="pc-row">{"".join(parts)}</div>{chips}</div>'
-
-
-def documents_html(docs: list[dict], prefix: str = "") -> str:
-    head = banner_html(prefix)
-    title = '<div class="pc-card-head"><h3>המסמכים שלי</h3></div>'
-    if not docs:
-        return head + (f'<div class="pc-card">{title}<div class="pc-empty">עדיין לא הועלו מסמכים. '
-                       'אפשר להעלות תלוש שכר או דוח רבעוני מקופת גמל, השתלמות או פנסיה. '
-                       'הקובץ עצמו לא נשמר, רק המספרים שחולצו ממנו.</div></div>')
-    slips = [d for d in docs if d.get("doc_type", "payslip") == "payslip"]
-    reports = [d for d in docs if d.get("doc_type") == "fund_report"]
-    body = ""
-    if slips:
-        body += '<div class="pc-section">תלושי שכר</div>' + "".join(_slip_card(d) for d in slips[:3])
-    if reports:
-        body += '<div class="pc-section">דוחות מקופות</div>' + "".join(_report_card(d) for d in reports[:3])
-    return head + f'<div class="pc-card">{title}{body}</div>'
-
-
-def plan_html(plan: SavingsPlan, prefix: str = "") -> str:
-    head = banner_html(prefix)
-    title = '<div class="pc-card-head"><h3>תוכנית החיסכון החודשית</h3>'
-    if plan.is_ready():
-        status = '<span class="pc-chip pc-chip-ok">מאושרת</span>'
-    elif plan.savings_value:
-        status = '<span class="pc-chip pc-chip-wait">ממתינה לאישור</span>'
-    else:
-        status = '<span class="pc-chip pc-chip-idle">לא נבנתה</span>'
-    title += status + "</div>"
-    if not plan.savings_value:
-        return head + f'<div class="pc-card">{title}<div class="pc-empty">עדיין אין תוכנית. אפשר לבנות אחת בשיחה עם הסוכן או בעריכה ידנית למטה.</div></div>'
-    rule = f"{_money(plan.savings_value)} בכל חודש" if plan.savings_mode == "fixed" else f"{plan.savings_value * 100:.0f}% מהנטו"
-    buckets = _chips([f"{b.name} {b.share * 100:.0f}%" for b in plan.buckets])
-    income = _field("הכנסה נטו אופיינית", _value(_money(plan.monthly_net_income)) if plan.monthly_net_income else _value("—", muted=True))
-    reasoning = f'<div class="pc-quote">{esc(plan.rationale)}</div>' if plan.rationale else ""
-    return head + (f'<div class="pc-card">{title}<div class="pc-grid">'
-                   + _field("כמה מפרישים", _value(rule)) + income
-                   + _field("לאן הולכת ההפרשה", buckets, full=True) + "</div>" + reasoning + "</div>")
-
-
-def _action_text(action: dict) -> str:
-    if action["type"] == "transfer":
-        return f'העבר <b>{esc(_money(action["amount"]))}</b> אל {esc(action["bucket"])}'
-    return f'קנה <b>{esc(_money(action["amount"]))}</b> ב-<span dir="ltr">{esc(action["symbol"])}</span>'
-
-
-def salary_result_html(result: dict) -> str:
-    items = "".join(f"<li>{_action_text(a)}</li>" for a in result["actions"]) or "<li>אין פעולות להצעה החודש</li>"
-    notes = [f"הסכום החופשי להוצאות: {_money(result['free_to_spend'])}"]
-    if result.get("pension_contributions") or result.get("study_fund_contributions"):
-        notes.append(f"הפרשות החודש: פנסיה {_money(result['pension_contributions'])}, השתלמות {_money(result['study_fund_contributions'])}")
-    notes.append(f"סך החיסכון החודש כולל הפרשות: {_money(result['total_saved_this_month'])}")
-    warn = "".join(f'<div class="pc-banner pc-banner-err">{esc(w)}</div>' for w in result.get("warnings", []))
-    if result.get("cap_breached"):
-        warn += ('<div class="pc-banner pc-banner-info">נכס בודד חורג מהתקרה שהוגדרה: '
-                 + esc(", ".join(result["breaching_symbols"])) + ". ההחלטה אם למכור שלך.</div>")
-    return (f'<div class="pc-card"><div class="pc-card-head"><h3>נכנסה משכורת: {esc(result.get("period") or "")}</h3>'
-            f'<span class="pc-chip pc-chip-idle">נטו {esc(_money(result["net"]))}</span></div>'
-            f'<div class="pc-empty">הצעה לאישור. לא בוצע כלום.</div>{warn}'
-            f'<div class="pc-section">מה לעשות עם {esc(_money(result["set_aside"]))}</div><ul class="pc-actions">{items}</ul>'
-            f'<div class="pc-empty" style="margin-top:12px">' + "<br>".join(esc(n) for n in notes) + "</div></div>")
 
 
 def salary_history_html(events: list[dict], prefix: str = "") -> str:

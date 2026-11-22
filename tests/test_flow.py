@@ -18,7 +18,6 @@ from portfolio_copilot.db import Store
 from portfolio_copilot.schemas import InvestorProfile
 from portfolio_copilot.ui import intake_progress_html
 
-FETCH = lambda symbol: 100.0
 def new_store():
     store = Store(":memory:")
     return store, store.get_or_create_user("demo")
@@ -45,7 +44,7 @@ def say(monkeypatch, handler, text, history, profile, *tool_calls, reply="הבנ
 def test_full_journey(monkeypatch):
     store, uid = new_store()
     assert not any(appmod.stage_flags(store, uid).values())
-    chat = appmod.make_intake_chat_handler(store, uid, fetch=FETCH)
+    chat = appmod.make_intake_chat_handler(store, uid)
 
     # 1. שיחת היכרות: הפרופיל נבנה דרך הכלים, תור אחרי תור
     history = appmod.intake_opening(store.load_profile(uid))
@@ -73,9 +72,9 @@ def test_full_journey(monkeypatch):
     out, _ = say(monkeypatch, chat, "פרישה, 10 שנים. ואני לא מוכר את ZIM", history, profile,
                  ("update_profile", {"investment_goal": "פרישה", "investment_horizon_years": 10,
                                      "recommended_risk_level": "מאוזן", "agent_reasoning": "אופק בינוני"}),
-                 ("add_restriction", {"symbol": "ZIM"}), reply="מציע רמת סיכון מאוזנת. מתאים לך?")
+                 ("add_restriction", {"item": "ZIM"}), reply="מציע רמת סיכון מאוזנת. מתאים לך?")
     _, history, profile, panel, _, _ = out
-    assert profile.no_sell_symbols == ["ZIM"] and "ממתין לאישור" in panel
+    assert profile.no_buy_symbols == ["ZIM"] and "ממתין לאישור" in panel
     assert profile.unknown_fields == ["pension_balance"] and profile.monthly_debt_payments == 0
 
     out, _ = say(monkeypatch, chat, "מאשר. אפשר 10,000 בחודש", history, profile,
@@ -224,14 +223,14 @@ def test_payslip_upload_fills_fields(monkeypatch):
     monkeypatch.setattr(appmod, "read_document", lambda path, client, model: doc)
     net, pension, study, status = appmod.make_payslip_handler(store, uid)("slip.pdf")
     assert (net, pension, study) == (17200.0, 2100.0, 900.0) and "התלוש נקרא" in status
-    assert len(store.list_documents(uid, "payslip")) == 1
+    assert store.conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 1
 
     def not_a_payslip(path, client, model):
         raise ValueError("כרגע אפשר לקרוא רק תלושי שכר.")
 
     monkeypatch.setattr(appmod, "read_document", not_a_payslip)
     *_, status = appmod.make_payslip_handler(store, uid)("report.pdf")
-    assert "רק תלושי שכר" in status and len(store.list_documents(uid, "payslip")) == 1
+    assert "רק תלושי שכר" in status and store.conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 1
 
 
 def test_three_stages_and_no_analysis_tab():
@@ -258,7 +257,7 @@ def test_default_percent_comes_from_interview_and_user_can_change_it():
     assert component(demo, appmod.AMOUNT_LABEL).value == 25.0
     assert component(demo, "כמה להשקיע החודש").value == "אחוז מהנטו"
     mode, value, *_ = appmod.make_monthly_defaults_handler(store, uid)()
-    assert mode["value"] == "אחוז מהנטו" and value["value"] == 25.0 and value["info"] == appmod.DEFAULT_PERCENT_INFO
+    assert mode["value"] == "אחוז מהנטו" and value["value"] == 25.0 and "אפשר לשנות" in value["info"]
     html = appmod.make_monthly_handler(store, uid)(40000, 0, 0, "אחוז מהנטו", 10)  # המשתמש שינה ל-10%
     assert "מה לעשות עם ₪4,000" in html
 
@@ -268,7 +267,15 @@ def test_no_default_percent_when_interview_has_no_values():
     store.save_profile(uid, complete_profile(monthly_deposit=None))
     demo, _ = appmod.build_demo(store, uid)
     assert component(demo, appmod.AMOUNT_LABEL).value is None
-    assert appmod.make_monthly_defaults_handler(store, uid)()[1]["value"] is None
+    value = appmod.make_monthly_defaults_handler(store, uid)()[1]
+    assert value["value"] is None and value["info"].startswith("השדה ריק")
+
+
+def test_default_percent_for_partnered_uses_combined_interview_net():
+    store, uid = new_store()
+    store.save_profile(uid, complete_profile(marital_status="נשוי", spouse_monthly_net_income=40000))
+    value = appmod.make_monthly_defaults_handler(store, uid)()[1]  # 10,000 מתוך 80,000
+    assert value["value"] == 12.5 and "משותף" in value["info"]
 
 
 def test_emergency_fund_is_not_requested_again_every_month():

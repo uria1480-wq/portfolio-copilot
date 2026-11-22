@@ -4,7 +4,7 @@ import inspect
 import gradio as gr
 
 from portfolio_copilot.agent import chat_step, client, MODEL_NAME
-from portfolio_copilot.db import Store
+from portfolio_copilot.db import ALL_HISTORY, Store
 from portfolio_copilot.documents import read_document
 from portfolio_copilot.proposal import (build_proposal, default_savings_percent, emergency_deposited, monthly_report,
                                         partner_fields_shown)
@@ -17,10 +17,10 @@ from portfolio_copilot.ui import (CSS, banner_html, hero_html, intake_progress_h
 USER_NAME = "demo"  # בהמשך אפשר להחליף בהתחברות אמיתית; כל הקוד כבר עובד לפי user_id
 NOCHANGE = getattr(gr, "skip", gr.update)
 SUGGESTIONS = [
-    "מה מצב התיק שלי?",
-    "כמה דמי ניהול אני משלם בקופה?",
-    "איך כדאי לחלק הפקדה של 2,000 ₪?",
-    "כמה דמי ניהול בחשבון מסחר?",
+    "מה ההצעה שלי ולמה?",
+    "כמה חסר לי בקרן החירום?",
+    "איך כדאי לחלק השקעה של 2,000 ₪ החודש?",
+    "איזה מסלול מתאים לי בפנסיה ובהשתלמות?",
 ]
 INTAKE_GREETING = ("שלום! אני Portfolio Copilot. כמה שאלות קצרות, אחת בכל פעם, כדי שהתוכנית תתאים לך. "
                    "אפשר לתקן כל פרט בהמשך השיחה. נתחיל: מה הגיל שלך?")
@@ -39,14 +39,14 @@ def stage_flags(store: Store, user_id: int) -> dict:
 
 
 # ---------- שיחה עם הסוכן (משותף לשלב 1 ולטאב הצד) ----------
-def chat_turn(store: Store, user_id: int, kb, user_input: str, chat_history, profile_state, fetch=None):
+def chat_turn(store: Store, user_id: int, user_input: str, chat_history, profile_state):
     """תור אחד מול הסוכן. הפרופיל מתעדכן רק דרך הכלים שהסוכן מפעיל, ונשמר בסוף התור."""
     chat_history = list(chat_history or [])
     if profile_state is None:
         profile_state = store.load_profile(user_id)
     chat_history.append({"role": "user", "content": user_input})
     try:
-        bot_reply, updated_profile = chat_step(chat_history, profile_state, store, user_id, fetch=fetch, kb=kb)
+        bot_reply, updated_profile = chat_step(chat_history, profile_state, store, user_id)
     except Exception as e:
         bot_reply = f"שגיאה בתקשורת עם הסוכן: {e}"
         updated_profile = profile_state
@@ -66,14 +66,14 @@ def intake_panel_html(profile: InvestorProfile) -> str:
     return intake_progress_html(profile) + profile_html(profile)
 
 
-def make_intake_chat_handler(store: Store, user_id: int, kb=None, fetch=None):
+def make_intake_chat_handler(store: Store, user_id: int):
     """שלב 1 לפי תרחיש 2: הסוכן שואל שאלה אחת בכל פעם ושומר את הפרופיל דרך הכלים, עד שהוא מלא."""
     def send(user_input, chat_history, profile_state):
         if not user_input or not user_input.strip():
             profile = profile_state if profile_state is not None else store.load_profile(user_id)
             return ("", chat_history, profile, intake_panel_html(profile), profile_html(profile),
                     stages_html(stage_flags(store, user_id)))
-        history, profile = chat_turn(store, user_id, kb, user_input, chat_history, profile_state, fetch)
+        history, profile = chat_turn(store, user_id, user_input, chat_history, profile_state)
         return ("", history, profile, intake_panel_html(profile), profile_html(profile),
                 stages_html(stage_flags(store, user_id)))
 
@@ -104,20 +104,18 @@ def make_proposal_handler(store: Store, user_id: int):
 # ---------- ניהול חודשי ----------
 PERCENT_MODE, FIXED_MODE = "אחוז מהנטו", "סכום קבוע בשקלים"
 AMOUNT_MODES = {PERCENT_MODE: "percent", FIXED_MODE: "fixed"}
-DEFAULT_PERCENT_INFO = "מחושב ממה שאמרת בראיון, אפשר לשנות"
 AMOUNT_LABEL = "אחוז מהנטו שלך (או מהנטו המשותף, אם הוזן נטו בן/בת הזוג), או סכום בשקלים"
 PARTNER_COMPONENTS = 4  # נטו, פנסיה, השתלמות ותלוש של בן/בת הזוג
-ALL_HISTORY = -1  # SQLite: LIMIT -1 הוא בלי הגבלה. קרן החירום והדשבורד סופרים את כל הדיווחים
 
 
 def make_monthly_defaults_handler(store: Store, user_id: int):
-    """ערכי פתיחה לדף הניהול החודשי מהפרופיל: מצב "אחוז מהנטו", האחוז מהראיון (או ריק),
+    """ערכי פתיחה לדף הניהול החודשי מהפרופיל: מצב "אחוז מהנטו", האחוז מהראיון (או ריק) עם הסבר,
     ושדות בן/בת הזוג רק למי שנשוי/בזוגיות. בלי חישוב משלו."""
     def defaults():
         profile = store.load_profile(user_id)
         pct = default_savings_percent(profile)
         shown = partner_fields_shown(profile)
-        return (gr.update(value=PERCENT_MODE), gr.update(value=pct, info=DEFAULT_PERCENT_INFO if pct is not None else None),
+        return (gr.update(value=PERCENT_MODE), gr.update(value=pct.value, info=pct.explanation),
                 *[gr.update(visible=shown) for _ in range(PARTNER_COMPONENTS)])
 
     return defaults
@@ -180,11 +178,11 @@ def make_partner_payslip_handler(store: Store, user_id: int):
 
 
 # ---------- צ'אט: כלי צדדי ----------
-def make_chat_handler(store: Store, user_id: int, kb=None):
+def make_chat_handler(store: Store, user_id: int):
     def user_message(user_input, chat_history, profile_state):
         if not user_input or not user_input.strip():
             return "", chat_history, profile_state, profile_html(profile_state)
-        chat_history, updated_profile = chat_turn(store, user_id, kb, user_input, chat_history, profile_state)
+        chat_history, updated_profile = chat_turn(store, user_id, user_input, chat_history, profile_state)
         return "", chat_history, updated_profile, profile_html(updated_profile)
 
     return user_message
@@ -244,7 +242,10 @@ def build_demo(store: Store, user_id: int):
             # --- 3. ניהול חודשי ---
             with gr.Tab("3. ניהול חודשי", id="monthly") as monthly_tab:
                 gr.HTML('<div class="pc-card"><div class="pc-card-head"><h3>דיווח חודשי</h3></div><div class="pc-empty">'
-                        'הזן את נתוני החודש, או העלה תלוש שימלא אותם. רמת הסיכון והתמהיל נלקחים מהפרופיל.</div></div>')
+                        'הזן את נתוני החודש, או העלה תלוש שימלא אותם. רמת הסיכון והתמהיל נלקחים מהפרופיל.<br>'
+                        'האחוז ההתחלתי מחושב מהראיון: ההפקדה החודשית חלקי הנטו שלך, ולנשוי/ה או בזוגיות שמסר/ה '
+                        'הכנסת בן/בת זוג, חלקי הנטו המשותף. כשמזינים החודש נטו של בן/בת הזוג, האחוז חל על הנטו המשותף.'
+                        '</div></div>')
                 payslip_in = gr.File(label="תלוש שכר PDF (לא חובה)", file_types=[".pdf"])
                 payslip_status = gr.HTML("")
                 with gr.Row():
@@ -263,8 +264,8 @@ def build_demo(store: Store, user_id: int):
                 partner_status = gr.HTML("")
                 with gr.Row():
                     amount_mode_in = gr.Radio(list(AMOUNT_MODES), value=PERCENT_MODE, label="כמה להשקיע החודש")
-                    amount_in = gr.Number(**supported(gr.Number, label=AMOUNT_LABEL, value=default_pct,
-                                                      info=DEFAULT_PERCENT_INFO if default_pct is not None else None))
+                    amount_in = gr.Number(**supported(gr.Number, label=AMOUNT_LABEL, value=default_pct.value,
+                                                      info=default_pct.explanation))
                 salary_btn = gr.Button("חשב חלוקה", variant="primary")
                 salary_display = gr.HTML(salary_history_html(store.list_salary_events(user_id)))
                 to_chat_btn = gr.Button("יש לי שאלה? דבר עם הסוכן", variant="secondary")
@@ -275,7 +276,7 @@ def build_demo(store: Store, user_id: int):
                     with gr.Column(scale=5):
                         chatbot = gr.Chatbot(**supported(
                             gr.Chatbot, label="שיחה", height=480, rtl=True,
-                            placeholder="<strong>שאלות על התיק, המסמכים או עלויות</strong><br>הסוכן מכיר את הפרופיל והנתונים שלך."))
+                            placeholder="<strong>שאלות על ההצעה, קרן החירום או ההשקעה החודשית</strong><br>הסוכן מכיר את הפרופיל שלך, והמספרים מחושבים בקוד."))
                         with gr.Row():
                             suggestion_buttons = [gr.Button(t, size="sm", variant="secondary", elem_classes="pc-suggest") for t in SUGGESTIONS]
                         with gr.Row():

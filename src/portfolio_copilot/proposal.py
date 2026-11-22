@@ -353,14 +353,37 @@ def allocate_monthly(profile: InvestorProfile, deposit: float, today: date | Non
                              unallocated=unallocated, missing=missing, reasons=reasons)
 
 
-def default_savings_percent(profile: InvestorProfile) -> float | None:
-    """ברירת המחדל לאחוז ההשקעה החודשי: monthly_deposit / monthly_net_income מהראיון, עד ספרה עשרונית אחת.
-    None אם אחד מהם חסר, הנטו 0, או שהתוצאה מעל 100%. לא ממציאים ערך."""
+class PercentDefault(BaseModel):
+    """ברירת המחדל לשדה האחוז בדיווח החודשי. value=None: השדה ריק, ו-explanation אומר למה."""
+    value: float | None = None
+    explanation: str
+
+
+def default_savings_percent(profile: InvestorProfile) -> PercentDefault:
+    """ברירת המחדל לאחוז ההשקעה החודשי מהראיון, עד ספרה עשרונית אחת.
+    נשוי/ידוע בציבור עם הכנסת בן/בת זוג ידועה: monthly_deposit / (monthly_net_income + spouse_monthly_net_income).
+    אחרת: monthly_deposit / monthly_net_income. ריק (עם הסבר) אם חסר נתון, הנטו 0 או שהתוצאה מעל 100%."""
     deposit, net = profile.monthly_deposit, profile.monthly_net_income
-    if deposit is None or not net:
-        return None
-    pct = round(deposit / net * 100, 1)
-    return None if pct > 100 else pct
+    combined = partner_fields_shown(profile) and profile.spouse_monthly_net_income is not None
+    base = "הנטו המשותף" if combined else "הנטו שלך"
+    if deposit is None:
+        return PercentDefault(explanation="השדה ריק: בראיון לא נמסר כמה אפשר להפריש בחודש. הזן אחוז או סכום.")
+    if net is None:
+        return PercentDefault(explanation="השדה ריק: בראיון לא נמסרה הכנסה נטו חודשית. הזן אחוז או סכום.")
+    total = round(net + (profile.spouse_monthly_net_income if combined else 0), 2)
+    if total <= 0:
+        return PercentDefault(explanation=f"השדה ריק: {base} בראיון הוא ₪0, ואי אפשר לחשב ממנו אחוז.")
+    pct = round(deposit / total * 100, 1)
+    if pct > 100:
+        return PercentDefault(explanation=f"השדה ריק: ההפקדה מהראיון ({_money(deposit)}) גבוהה מ{base} "
+                                          f"({_money(total)}). הזן אחוז או סכום.")
+    if combined:
+        how = (f"{_money(deposit)} מתוך נטו משותף של {_money(total)} ({_money(net)} שלך + "
+               f"{_money(profile.spouse_monthly_net_income)} של בן/בת הזוג), לפי הראיון. "
+               "האחוז יחול על הנטו המשותף רק אם תזין גם את נטו בן/בת הזוג החודש.")
+    else:
+        how = f"{_money(deposit)} מתוך נטו של {_money(total)}, לפי הראיון."
+    return PercentDefault(value=pct, explanation=how + " אפשר לשנות.")
 
 
 def partner_fields_shown(profile: InvestorProfile) -> bool:

@@ -4,7 +4,6 @@ from types import SimpleNamespace
 import pytest
 
 from portfolio_copilot import documents
-from portfolio_copilot.agent_tools import run_tool
 from portfolio_copilot.db import Store
 from portfolio_copilot.documents import (Payslip, check_payslip, detect_doc_type, extract_payslip,
                                          fix_hebrew_order, read_document, redact)
@@ -106,16 +105,7 @@ def test_store_keeps_one_slip_per_month_newest_first():
     s.save_document(uid, _doc("2026-08", 6000.0))
     s.save_document(uid, _doc("2026-09", 6300.0))
     s.save_document(uid, _doc("2026-09", 6400.0))  # העלאה חוזרת של אותו חודש מחליפה
-    docs = s.list_documents(uid, "payslip")
-    assert [d["period"] for d in docs] == ["2026-09", "2026-08"]
-    assert docs[0]["summary"]["net_to_bank"] == 6400.0
+    rows = s.conn.execute("SELECT period, data_json FROM documents WHERE user_id = ? ORDER BY period DESC", (uid,))
+    docs = [(r["period"], json.loads(r["data_json"])["summary"]["net_to_bank"]) for r in rows]
+    assert docs == [("2026-09", 6400.0), ("2026-08", 6000.0)]
 
-
-def test_get_documents_tool():
-    s = Store(":memory:")
-    uid = s.get_or_create_user("demo")
-    assert run_tool("get_documents", {}, s, uid, InvestorProfile())["payslips"] == []
-    s.save_document(uid, _doc("2026-08", 6000.0))
-    s.save_document(uid, _doc("2026-09", 6400.0))
-    r = run_tool("get_documents", {}, s, uid, InvestorProfile())
-    assert r["avg_net_to_bank"] == 6200.0 and r["payslips"][0]["period"] == "2026-09"

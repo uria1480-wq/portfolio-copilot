@@ -23,30 +23,20 @@ def test_missing_profile_returns_empty_profile():
     assert s.load_profile(s.get_or_create_user("new")) == InvestorProfile()
 
 
-def test_holding_upsert_updates_instead_of_duplicating():
-    s = Store(":memory:")
-    uid = s.get_or_create_user("uria")
-    s.upsert_holding(uid, "zim", 100, 20.5)
-    s.upsert_holding(uid, "ZIM", 150, 21.0)
-    assert s.list_holdings(uid) == [{"symbol": "ZIM", "quantity": 150, "avg_cost": 21.0}]
-    s.delete_holding(uid, "zim")
-    assert s.list_holdings(uid) == []
-
-
 def test_users_are_isolated():
     s = Store(":memory:")
     a, b = s.get_or_create_user("a"), s.get_or_create_user("b")
-    s.upsert_holding(a, "SPY", 5)
-    s.add_deposit(a, 1000)
-    assert s.list_holdings(b) == [] and s.list_deposits(b) == []
+    s.save_profile(a, InvestorProfile(age=30))
+    s.add_salary_event(a, {"period": "2026-11", "net": 1000.0})
+    assert s.load_profile(b) == InvestorProfile() and s.list_salary_events(b) == []
 
 
-def test_deposits_ordered_and_data_survives_reopen(tmp_path):
+def test_salary_events_newest_first_and_survive_reopen(tmp_path):
     path = tmp_path / "p.db"
     s = Store(path)
     uid = s.get_or_create_user("uria")
-    s.add_deposit(uid, 500, "ינואר", "2026-01-01")
-    s.add_deposit(uid, 700, "פברואר", "2026-02-01")
+    for net in (1000.0, 2000.0):
+        s.add_salary_event(uid, {"period": "2026-11", "net": net})
     s.close()
     s2 = Store(path)
-    assert [d["amount"] for d in s2.list_deposits(s2.get_or_create_user("uria"))] == [500, 700]
+    assert [e["net"] for e in s2.list_salary_events(s2.get_or_create_user("uria"))] == [2000.0, 1000.0]

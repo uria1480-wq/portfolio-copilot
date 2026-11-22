@@ -39,7 +39,9 @@
 | `test_agent_tools.py` | 62 | `get_proposal` ו-`get_monthly_allocation` מחזירים את מה שהקוד חישב | `agent_tools`, `db`, `monthly`, `proposal`, `schemas` | לא | להשאיר |
 | `test_db.py` | 61 | משתמשים, פרופיל הלוך-חזור, דיווחים, ניקוי "לא למכור" בטעינה | `db`, `schemas` | לא | להשאיר |
 | `test_documents.py` | 111 | עברית הפוכה, הסתרת מזהים, ניקוי מספרים, בדיקות חשבון, נשלח רק טקסט מוסתר | `documents`, `db`, `schemas` | מדומה | להשאיר |
-| `test_flow.py` | 565 | זרימות דרך ה-handlers: ראיון, `--fresh`, `--share` וסיסמה, נקודת הכניסה, דיווח חודשי, תלוש ואזהרות, זוגות, קרן חירום, דשבורד | `agent`, `app`, `db`, `schemas`, `ui` | מדומה | להשאיר. הוא הקובץ הגדול ביותר, ואפשר לפצל אותו בהמשך (ראו שאלות פתוחות) |
+| `test_flow_interview.py` | 156 | זרימת ההיכרות דרך ה-handlers: ראיון מלא, ערך שנדחה, הודעה ריקה, שגיאת מודל, הודעת פתיחה, כרטיס התקדמות. כאן גם העזרים המשותפים (`new_store`, `complete_profile`, `say`) | `agent`, `app`, `db`, `schemas`, `ui`, `test_agent_flow` | מדומה | להשאיר |
+| `test_flow_monthly.py` | 293 | דיווח חודשי, תלוש ואזהרות, ברירת מחדל לאחוז, קרן חירום מצטברת, זוגות, היסטוריה, דשבורד | `app`, `schemas`, `test_flow_interview` | לא | להשאיר |
+| `test_flow_wiring.py` | 146 | `--fresh`, `--share` וסיסמה, בניית הממשק, שלבים, גבול ה-client, קונסולת UTF-8, נקודת הכניסה, ש-pytest לא אוסף סקריפטים | `agent`, `app`, `db`, `schemas`, `test_flow_interview` | מדומה | להשאיר |
 | `test_parsing.py` | 94 | `final_reply_text`, ו-`extract_json` המשותף לסוכן ולתלוש | `agent`, `documents`, `schemas` | מדומה | להשאיר |
 | `test_profile_tools.py` | 430 | `update_profile` ו-`add_restriction`, "לא יודע"/"אין", זוגות (`is_partnered`), `is_complete` (הבדיקה הועברה לכאן מ-`test_profile_merge.py`) | `agent`, `agent_tools`, `db`, `schemas` | מדומה | להשאיר |
 | `test_proposal.py` | 490 | חוקי ההצעה, החלוקה החודשית, ברירת מחדל לאחוז. מוודא ששלושת מודולי החישוב לא מייבאים openai ותלויים זה בזה בכיוון אחד | `proposal`, `monthly`, `restrictions`, `schemas`, `db`, `ui` | לא | להשאיר |
@@ -84,7 +86,6 @@
 
 | קובץ | שורות | הערה |
 | --- | --- | --- |
-| `tests/test_flow.py` | 565 | הקובץ הכי גדול. אפשר לפצל לראיון, חודשי והפעלה |
 | `ui.py` | 416 | כולל כ-90 שורות CSS |
 | `app.py` | 371 | `build_demo` ארוכה |
 | `schemas.py` | 316 | ירד מ-354 אחרי מחיקת `merge_profile` |

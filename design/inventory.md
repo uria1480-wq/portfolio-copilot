@@ -96,3 +96,20 @@
 5. **סט הערכה לא קיים**, למרות שהוא בתחום ה-MVP (`mvp.md`).
 6. **`SYSTEM_PROMPT` אומר "בקורס מבוא לבינה מלאכותית"**, ושם הקורס ב-`CLAUDE.md` הוא "פיתוח פתרונות מבוססי AI".
 7. **`share=True` עם סיסמה קבועה בקוד** (`app.py:355`): כל הרצה פותחת קישור ציבורי.
+
+## 8. סיכום הפסקים (מה לאחד, לפצל או למחוק). לא בוצע
+
+| מה | פסק | למה |
+| --- | --- | --- |
+| `test_gemini.py` | למחוק (או להעביר ל-`scripts/`) | pytest אוסף אותו ושולח בקשה אמיתית בכל הרצה. `scripts/latency_check.py` כבר בודק חיבור |
+| `schemas.merge_profile`, `LIST_FIELDS`, `PROTECTED_FIELDS` | למחוק | קוד מת: רק בדיקות קוראות להם |
+| `tests/test_profile_merge.py` | למחוק (את בדיקת `is_complete` להעביר) | בודק רק את `merge_profile` |
+| `app._choice` | למחוק | לא נקרא |
+| `make_payslip_handler` + `make_partner_payslip_handler` | לאחד לפונקציה אחת עם פרמטר | זהים חוץ מהודעה |
+| `proposal._money`, `ui._money`, `situation.format_value("money")` | לאחד | אותו עיצוב בשלושה מקומות |
+| `documents._parse_json` + `agent.extract_json` | לאחד | אותו regex |
+| `partner_fields_shown` + `spouse_income_required` | לאחד | אותה בדיקה |
+| `proposal.py` | לפצל ל-`restrictions.py` ו-`monthly.py` | 622 שורות, ארבעה תחומים |
+| `tests/test_flow.py` | לפצל (אופציונלי) | 477 שורות, כל המסכים |
+| טבלאות DB לא בשימוש | להשאיר | מחיקה משנה מסד קיים, ואין בזה תועלת |
+| `[project.scripts]` ב-`pyproject.toml` | לתקן או למחוק | מצביע על `main` שלא קיים |

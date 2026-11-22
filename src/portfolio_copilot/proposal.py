@@ -212,19 +212,56 @@ def substitute_for(asset_class: str, blocked: list[str]) -> str | None:
     return next((s for s in SUBSTITUTES[asset_class] if s not in blocked), None)
 
 
-def apply_restrictions(pct: dict[str, float], blocked: list[str]) -> tuple[dict[str, float], list[str]]:
+def blocked_groups(profile: InvestorProfile) -> list[str]:
+    """הקבוצות שהמשתמש חסם במלואן ("מניות", "אג"ח"), בסדר ASSET_GROUPS."""
+    targets = {restriction_target(item) for item in profile.no_buy_symbols}
+    return [g for g in ASSET_GROUPS if g in targets]
+
+
+def _group_reason(group: str, moves: dict[str, tuple[str | None, float]]) -> str:
+    """הסבר אחד לקבוצה שנחסמה: אילו סוגים בה, ולאן עבר החלק שלהם."""
+    classes = ASSET_GROUPS[group]
+    head = f"ביקשת לא לקנות {group} ({' ו'.join(classes)})"
+    by_target: dict[str | None, float] = {}
+    for k in classes:
+        target, share = moves[k]
+        by_target[target] = round(by_target.get(target, 0.0) + share, 2)
+    moved = {t: s for t, s in by_target.items() if t is not None and s}
+    stuck = by_target.get(None, 0.0)
+    parts = []
+    if len(moved) == 1:
+        [(t, s)] = moved.items()
+        parts.append(f"ה-{s:g}% שלהן עברו ל{t}")
+    elif moved:
+        parts.append("החלק שלהן עבר כך: " + ", ".join(f"{s:g}% ל{t}" for t, s in moved.items()))
+    if stuck:
+        parts.append(f"{stuck:g}% נשארו בהן כי כל החלופות אסורות גם הן")
+    return head + (", ולכן " + " ו".join(parts) if parts else "") + "."
+
+
+def apply_restrictions(pct: dict[str, float], blocked: list[str],
+                       groups: list[str] | tuple[str, ...] = ()) -> tuple[dict[str, float], list[str]]:
     """חוק 6: מעביר את האחוז של כל סוג נכס אסור לתחליף שלו. סכום האחוזים לא משתנה.
-    מחזיר (אחוזים חדשים, הסברים). סוג נכס בלי תחליף מותר נשאר במקומו, עם הסבר."""
+    מחזיר (אחוזים חדשים, הסברים). סוג נכס בלי תחליף מותר נשאר במקומו, עם הסבר.
+    groups: קבוצות שנחסמו במלואן. לכל אחת הסבר אחד במקום הסבר לכל סוג נכס בה."""
     pct, reasons = dict(pct), []
+    moves: dict[str, tuple[str | None, float]] = {}
     for k in blocked:
         share = pct[k]
         target = substitute_for(k, blocked)
+        moves[k] = (target, share)
+        if target is not None:
+            pct[target] = round(pct[target] + share, 2)
+            pct[k] = 0.0
+    in_groups = {k for g in groups for k in ASSET_GROUPS[g]}
+    reasons += [_group_reason(g, moves) for g in groups]
+    for k in blocked:
+        if k in in_groups:
+            continue
+        target, share = moves[k]
         if target is None:
             reasons.append(f"ביקשת לא לקנות {k}, אבל כל החלופות שלו אסורות גם הן, ולכן {share:g}% נשארו בו.")
-            continue
-        pct[target] = round(pct[target] + share, 2)
-        pct[k] = 0.0
-        if share:
+        elif share:
             reasons.append(f"ביקשת לא לקנות {k}, ולכן ה-{share:g}% שלו עברו ל{target}.")
     return pct, reasons
 
@@ -291,7 +328,7 @@ def _mix(profile: InvestorProfile, reasons: list[str]) -> tuple[float, float, di
     bonds_share = BONDS_SHARE_SHORT if profile.investment_horizon_years <= SHORT_HORIZON_YEARS else BONDS_SHARE_LONG
     reasons.append(f'שאר {100 - eq:g}%: אג"ח {bonds_share:.0%} (חצי ממשלתי, חצי קונצרני) וכספית '
                    f'{1 - bonds_share:.0%}. המניות מתחלקות שווה בין ארה"ב לעולם.')
-    pct, moved = apply_restrictions(pct, blocked_classes(profile))
+    pct, moved = apply_restrictions(pct, blocked_classes(profile), blocked_groups(profile))
     reasons.extend(moved)
     return round(sum(pct[k] for k in EQUITY_CLASSES), 2), table_pct, pct
 

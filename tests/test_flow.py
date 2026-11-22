@@ -463,3 +463,15 @@ def test_read_payslip_passes_agent_client(monkeypatch):
         path=path, client=client, model=model) or {"ok": True})
     assert agent.read_payslip("slip.pdf") == {"ok": True}
     assert seen == {"path": "slip.pdf", "client": agent.client, "model": agent.MODEL_NAME}
+
+
+def test_utf8_console_lets_hebrew_print_on_cp1252_stream():
+    import io
+
+    raw = io.BytesIO()
+    stream = io.TextIOWrapper(raw, encoding="cp1252")
+    appmod.utf8_console(stream)
+    print("[app] --fresh: מסד נתונים בזיכרון", file=stream)
+    stream.flush()
+    assert "מסד נתונים".encode("utf-8") in raw.getvalue()
+    appmod.utf8_console(object())  # זרם בלי reconfigure לא נשבר

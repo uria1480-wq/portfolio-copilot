@@ -5,8 +5,9 @@ import pytest
 
 from portfolio_copilot.agent_tools import run_profile_tool, run_tool
 from portfolio_copilot.db import Store
-from portfolio_copilot.proposal import (ASSET_CLASSES, CORP_BONDS, GOV_BONDS, MONEY_MARKET, US_EQUITY, WORLD_EQUITY,
-                                        allocate_monthly, asset_class_of, build_proposal)
+from portfolio_copilot.proposal import (ASSET_CLASSES, ASSET_GROUPS, CORP_BONDS, GOV_BONDS, MONEY_MARKET, US_EQUITY,
+                                        WORLD_EQUITY, allocate_monthly, asset_class_of, build_proposal, classes_blocked_by,
+                                        restriction_target)
 from portfolio_copilot.schemas import InvestorProfile
 
 TODAY = date(2026, 11, 22)
@@ -189,6 +190,29 @@ def test_group_restriction_blocks_whole_group(text, group):
     assert round(sum(m.values()), 2) == 100
     _, amounts = monthly(p)
     assert all(amounts[k] == 0 for k in group) and round(sum(amounts.values()), 2) == 3000
+
+
+@pytest.mark.parametrize("text, group, share", [("מניות", "מניות", 55), ('אג"ח', 'אג"ח', 31.5)])
+def test_group_restriction_explained_once_in_proposal(text, group, share):
+    _, p = run_profile_tool("add_restriction", {"item": text}, person())
+    reasons = build_proposal(p, TODAY).reasons
+    group_lines = [r for r in reasons if r.startswith(f"ביקשת לא לקנות {group} (")]
+    assert group_lines == [f"ביקשת לא לקנות {group} ({' ו'.join(ASSET_GROUPS[group])}), "
+                           f"ולכן ה-{share:g}% שלהן עברו ל{MONEY_MARKET}."]
+    assert not any(r.startswith(f"ביקשת לא לקנות {k},") for r in reasons for k in ASSET_GROUPS[group])
+    assert group_lines[0] in allocate_monthly(p, 3000, TODAY).reasons
+
+
+def test_bonds_group_with_money_market_blocked_explains_what_stayed():
+    reasons = build_proposal(person('אג"ח', MONEY_MARKET), TODAY).reasons
+    assert any(r.startswith('ביקשת לא לקנות אג"ח (') and "נשארו בהן" in r for r in reasons)
+    assert any(r.startswith(f"ביקשת לא לקנות {MONEY_MARKET},") and "נשארו בו" in r for r in reasons)
+
+
+@pytest.mark.parametrize("text", ["קרן השתלמות", "TSLA", "מניית TSLA"])
+def test_non_asset_text_is_not_a_restriction_target(text):
+    assert restriction_target(text) is None and classes_blocked_by(text) == ()
+    assert mix(person(text)) == BASE
 
 
 def test_group_restriction_is_saved_canonically_and_removable():

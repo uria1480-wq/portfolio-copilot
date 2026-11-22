@@ -1,5 +1,6 @@
 import argparse
 import inspect
+import sys
 
 import gradio as gr
 
@@ -335,7 +336,15 @@ def open_store(fresh: bool) -> Store:
     return Store(":memory:") if fresh else Store()
 
 
+def utf8_console(*streams) -> None:
+    """מעביר את הפלט ל-UTF-8, כדי שהדפסות בעברית לא ייכשלו ב-Windows (cp1252) כשהפלט מנותב לקובץ."""
+    for stream in streams or (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
+
+
 def main(argv=None):
+    utf8_console()
     args = parse_args(argv)
     store = open_store(args.fresh)
     if args.fresh:

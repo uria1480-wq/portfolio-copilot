@@ -144,3 +144,11 @@ def test_gemini_smoke_script_is_not_collected_by_pytest():
     root = Path(__file__).parents[1]
     assert not (root / "test_gemini.py").exists()
     assert not list((root / "scripts").glob("test_*.py"))
+
+
+def test_evals_are_not_collected_by_pytest():
+    """סטי ההערכה רצים רק בהפעלה מפורשת (חלקם קוראים ל-Gemini אמיתי)."""
+    from pathlib import Path
+
+    evals = Path(__file__).parents[1] / "evals"
+    assert evals.is_dir() and not list(evals.glob("test_*.py")) and not list(evals.glob("*_test.py"))
